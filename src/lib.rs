@@ -1,5 +1,6 @@
 pub mod cli;
 pub mod config;
+pub mod garmin;
 pub mod http;
 pub mod withings;
 
@@ -113,15 +114,42 @@ fn run_auth(args: AuthArgs) -> Result<i32, AppError> {
         prompt_line("Paste the redirect URL (or the bare code) your browser was sent to: ")?;
     let code = withings::extract_code(&pasted)?;
 
-    let token_response = withings::exchange_code(
+    let withings_tokens = withings::exchange_code(
         &client,
         &config.withings.client_id,
         &config.withings.client_secret,
         &code,
     )?;
 
-    // Merge the fresh Withings tokens into any existing token file (the
-    // Garmin section, written by ticket 06, must survive a Withings re-auth).
+    // One-time interactive Garmin mobile-SSO login (ticket 06).
+    let username = prompt_line("Garmin username (email): ")?;
+    let password = prompt_line("Garmin password: ")?;
+    let service_ticket = match garmin::login(&client, &username, &password)? {
+        garmin::LoginOutcome::Success { service_ticket } => service_ticket,
+        garmin::LoginOutcome::MfaRequired { method } => {
+            let mut attempts = 0;
+            loop {
+                attempts += 1;
+                if attempts > 3 {
+                    return Err(AppError::new(
+                        EXIT_AUTH,
+                        "too many rejected MFA codes; re-run `auth` to try again",
+                    ));
+                }
+                let code = prompt_line(&format!("Garmin MFA code (sent via {method}): "))?;
+                match garmin::verify_mfa(&client, &method, &code)? {
+                    garmin::MfaOutcome::Ticket(ticket) => break ticket,
+                    garmin::MfaOutcome::InvalidCode => {
+                        eprintln!("auth: Garmin rejected that MFA code; try again");
+                    }
+                }
+            }
+        }
+    };
+    let garmin_tokens = garmin::exchange_service_ticket(&client, &service_ticket)?;
+
+    // Only now persist tokens: a failure in either half of `auth` must not
+    // leave a partial token file behind.
     let tokens_path = config::tokens_path(&dir);
     let mut tokens = if tokens_path.exists() {
         config::load_tokens(&dir)?
@@ -133,14 +161,23 @@ fn run_auth(args: AuthArgs) -> Result<i32, AppError> {
         .map(|d| d.as_secs())
         .unwrap_or(0);
     tokens.withings = config::WithingsTokens {
-        access_token: token_response.access_token,
-        refresh_token: token_response.refresh_token.unwrap_or_default(),
-        expires_at: Some(now + token_response.expires_in),
+        access_token: withings_tokens.access_token,
+        refresh_token: withings_tokens.refresh_token.unwrap_or_default(),
+        expires_at: Some(now + withings_tokens.expires_in),
+    };
+    tokens.garmin = config::GarminTokens {
+        access_token: garmin_tokens.access_token,
+        refresh_token: garmin_tokens.refresh_token.unwrap_or_default(),
+        client_id: Some(garmin_tokens.client_id),
     };
     config::write_tokens(&tokens_path, &tokens)?;
 
     println!("auth: Withings connected (scope: user.metrics).");
-    println!("auth: Garmin auth lands in ticket 06.");
+    println!("auth: Garmin connected.");
+    println!(
+        "auth: tokens stored in {} (plaintext, 0600); keep this file private",
+        tokens_path.display()
+    );
     Ok(EXIT_OK)
 }
 

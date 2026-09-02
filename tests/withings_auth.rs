@@ -1,6 +1,9 @@
 //! Black-box tests for ticket 05: the Withings half of `auth` — the OAuth
 //! authorization-code flow against a fake Withings token server, driven
 //! entirely through the binary's stdin/stdout/exit-code seam.
+//!
+//! Since ticket 06, `auth` also runs the Garmin half, so every test wires a
+//! minimal always-succeeding Garmin SSO/diauth pair and feeds its prompts.
 
 mod common;
 
@@ -22,10 +25,46 @@ fn withings_token_server(tokens: &'static str) -> FakeServer {
     })])
 }
 
-/// The Withings token server points at the fake; all other hosts are dummy
-/// values so a stray request to them would fail fast rather than hit prod.
-fn auth_env(fake: &FakeServer) -> Vec<(&'static str, &str)> {
-    vec![("WGS_WITHINGS_API_BASE", fake.base_url.as_str())]
+/// Minimal always-succeeding Garmin SSO + diauth pair.
+fn garmin_servers() -> (FakeServer, FakeServer) {
+    let sso = FakeServer::start(vec![
+        Route::get("/mobile/sso/en_US/sign-in", |_req, _i| {
+            FakeResponse::new(200, "ok")
+        }),
+        Route::post("/mobile/api/login", |_req, _i| {
+            FakeResponse::json(
+                200,
+                r#"{"responseStatus": {"type": "SUCCESSFUL"}, "serviceTicketId": "ST-1"}"#,
+            )
+        }),
+    ]);
+    let diauth = FakeServer::start(vec![Route::post(
+        "/di-oauth2-service/oauth/token",
+        |_req, _i| {
+            FakeResponse::json(
+                200,
+                r#"{"access_token": "di-access", "refresh_token": "di-refresh"}"#,
+            )
+        },
+    )]);
+    (sso, diauth)
+}
+
+fn auth_env<'a>(
+    withings: &'a FakeServer,
+    sso: &'a FakeServer,
+    diauth: &'a FakeServer,
+) -> Vec<(&'static str, &'a str)> {
+    vec![
+        ("WGS_WITHINGS_API_BASE", withings.base_url.as_str()),
+        ("WGS_GARMIN_SSO_BASE", sso.base_url.as_str()),
+        ("WGS_GARMIN_DIAUTH_BASE", diauth.base_url.as_str()),
+    ]
+}
+
+/// Stdin for a full `auth` run: the Withings part, then Garmin credentials.
+fn auth_stdin(withings_input: &str) -> String {
+    format!("{withings_input}\nuser@example.com\nsecret\n")
 }
 
 const SUCCESS_TOKENS: &str = r#"{
@@ -44,12 +83,13 @@ const SUCCESS_TOKENS: &str = r#"{
 fn auth_prints_authorize_url_with_client_id_and_scope() {
     let dir = TempDir::new();
     write_config(&dir);
-    let fake = withings_token_server(SUCCESS_TOKENS);
+    let withings = withings_token_server(SUCCESS_TOKENS);
+    let (sso, diauth) = garmin_servers();
 
     let run = run_bin_stdin(
         &["auth", "--config-dir", dir.path().to_str().unwrap()],
-        &auth_env(&fake),
-        Some("http://localhost:8765/?code=abc123\n"),
+        &auth_env(&withings, &sso, &diauth),
+        Some(&auth_stdin("http://localhost:8765/?code=abc123")),
     );
 
     assert_eq!(run.code, 0, "stderr: {}", run.stderr);
@@ -86,19 +126,20 @@ fn auth_prints_authorize_url_with_client_id_and_scope() {
 fn auth_exchanges_pasted_code_and_persists_tokens() {
     let dir = TempDir::new();
     write_config(&dir);
-    let fake = withings_token_server(SUCCESS_TOKENS);
+    let withings = withings_token_server(SUCCESS_TOKENS);
+    let (sso, diauth) = garmin_servers();
 
     let run = run_bin_stdin(
         &["auth", "--config-dir", dir.path().to_str().unwrap()],
-        &auth_env(&fake),
-        Some("http://localhost:8765/?code=abc123&state=xyz\n"),
+        &auth_env(&withings, &sso, &diauth),
+        Some(&auth_stdin("http://localhost:8765/?code=abc123&state=xyz")),
     );
 
     assert_eq!(run.code, 0, "stderr: {}", run.stderr);
 
     // The exchange request must carry the exact Withings token-endpoint fields.
-    let token_calls = fake.requests_for("POST", "/v2/oauth2");
-    assert_eq!(token_calls.len(), 1, "calls: {:#?}", fake.requests());
+    let token_calls = withings.requests_for("POST", "/v2/oauth2");
+    assert_eq!(token_calls.len(), 1, "calls: {:#?}", withings.requests());
     let fields = parse_form(&token_calls[0].body);
     assert_eq!(form_value(&fields, "action"), "requesttoken");
     assert_eq!(form_value(&fields, "grant_type"), "authorization_code");
@@ -125,16 +166,17 @@ fn auth_exchanges_pasted_code_and_persists_tokens() {
 fn auth_accepts_a_bare_code_without_url() {
     let dir = TempDir::new();
     write_config(&dir);
-    let fake = withings_token_server(SUCCESS_TOKENS);
+    let withings = withings_token_server(SUCCESS_TOKENS);
+    let (sso, diauth) = garmin_servers();
 
     let run = run_bin_stdin(
         &["auth", "--config-dir", dir.path().to_str().unwrap()],
-        &auth_env(&fake),
-        Some("bare-code-123\n"),
+        &auth_env(&withings, &sso, &diauth),
+        Some(&auth_stdin("bare-code-123")),
     );
 
     assert_eq!(run.code, 0, "stderr: {}", run.stderr);
-    let token_calls = fake.requests_for("POST", "/v2/oauth2");
+    let token_calls = withings.requests_for("POST", "/v2/oauth2");
     let fields = parse_form(&token_calls[0].body);
     assert_eq!(form_value(&fields, "code"), "bare-code-123");
 }
@@ -143,12 +185,13 @@ fn auth_accepts_a_bare_code_without_url() {
 fn auth_rejected_code_exits_4_without_writing_tokens() {
     let dir = TempDir::new();
     write_config(&dir);
-    let fake = withings_token_server(r#"{"status": 2556}"#);
+    let withings = withings_token_server(r#"{"status": 2556}"#);
+    let (sso, diauth) = garmin_servers();
 
     let run = run_bin_stdin(
         &["auth", "--config-dir", dir.path().to_str().unwrap()],
-        &auth_env(&fake),
-        Some("http://localhost:8765/?code=bad-code\n"),
+        &auth_env(&withings, &sso, &diauth),
+        Some(&auth_stdin("http://localhost:8765/?code=bad-code")),
     );
 
     assert_eq!(run.code, 4, "stdout: {}", run.stdout);
@@ -167,14 +210,15 @@ fn auth_rejected_code_exits_4_without_writing_tokens() {
 fn auth_http_error_exits_4_without_writing_tokens() {
     let dir = TempDir::new();
     write_config(&dir);
-    let fake = FakeServer::start(vec![Route::post("/v2/oauth2", |_req, _i| {
+    let withings = FakeServer::start(vec![Route::post("/v2/oauth2", |_req, _i| {
         FakeResponse::new(500, "boom")
     })]);
+    let (sso, diauth) = garmin_servers();
 
     let run = run_bin_stdin(
         &["auth", "--config-dir", dir.path().to_str().unwrap()],
-        &auth_env(&fake),
-        Some("http://localhost:8765/?code=abc123\n"),
+        &auth_env(&withings, &sso, &diauth),
+        Some(&auth_stdin("http://localhost:8765/?code=abc123")),
     );
 
     assert_eq!(run.code, 4, "stdout: {}", run.stdout);
@@ -189,13 +233,17 @@ fn auth_http_error_exits_4_without_writing_tokens() {
 #[test]
 fn auth_prompts_for_missing_client_credentials_and_writes_config() {
     let dir = TempDir::new();
-    let fake = withings_token_server(SUCCESS_TOKENS);
+    let withings = withings_token_server(SUCCESS_TOKENS);
+    let (sso, diauth) = garmin_servers();
 
-    // Feed client id, client secret, then the pasted redirect URL.
+    // Feed client id, client secret, the pasted redirect URL, then the Garmin
+    // username/password.
     let run = run_bin_stdin(
         &["auth", "--config-dir", dir.path().to_str().unwrap()],
-        &auth_env(&fake),
-        Some("my-client-id\nmy-client-secret\nhttp://localhost:8765/?code=abc123\n"),
+        &auth_env(&withings, &sso, &diauth),
+        Some(
+            "my-client-id\nmy-client-secret\nhttp://localhost:8765/?code=abc123\nuser@example.com\nsecret\n",
+        ),
     );
 
     assert_eq!(run.code, 0, "stderr: {}", run.stderr);
@@ -210,34 +258,38 @@ fn auth_prompts_for_missing_client_credentials_and_writes_config() {
         config.contains(r#"client_secret = "my-client-secret""#),
         "config: {config}"
     );
-    let fields = parse_form(&fake.requests_for("POST", "/v2/oauth2")[0].body);
+    let fields = parse_form(&withings.requests_for("POST", "/v2/oauth2")[0].body);
     assert_eq!(form_value(&fields, "client_id"), "my-client-id");
     assert_eq!(form_value(&fields, "client_secret"), "my-client-secret");
 }
 
 #[test]
-fn auth_preserves_existing_garmin_tokens() {
+fn auth_overwrites_an_existing_token_file_without_error() {
     let dir = TempDir::new();
     write_config(&dir);
     write_file(
         &dir.path().join("tokens.json"),
         r#"{"garmin": {"access_token": "ga", "refresh_token": "gr", "client_id": "CID"}}"#,
     );
-    let fake = withings_token_server(SUCCESS_TOKENS);
+    let withings = withings_token_server(SUCCESS_TOKENS);
+    let (sso, diauth) = garmin_servers();
 
     let run = run_bin_stdin(
         &["auth", "--config-dir", dir.path().to_str().unwrap()],
-        &auth_env(&fake),
-        Some("http://localhost:8765/?code=abc123\n"),
+        &auth_env(&withings, &sso, &diauth),
+        Some(&auth_stdin("http://localhost:8765/?code=abc123")),
     );
 
     assert_eq!(run.code, 0, "stderr: {}", run.stderr);
     let tokens: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(dir.path().join("tokens.json")).unwrap())
             .unwrap();
-    assert_eq!(tokens["garmin"]["access_token"], "ga");
-    assert_eq!(tokens["garmin"]["refresh_token"], "gr");
-    assert_eq!(tokens["garmin"]["client_id"], "CID");
+    assert_eq!(tokens["garmin"]["access_token"], "di-access");
+    assert_eq!(tokens["garmin"]["refresh_token"], "di-refresh");
+    assert_eq!(
+        tokens["garmin"]["client_id"],
+        "GARMIN_CONNECT_MOBILE_ANDROID_DI_2025Q2"
+    );
     assert_eq!(tokens["withings"]["access_token"], "wa-access");
 }
 
@@ -245,12 +297,13 @@ fn auth_preserves_existing_garmin_tokens() {
 fn auth_with_closed_stdin_fails_cleanly_without_writing_files() {
     let dir = TempDir::new();
     write_config(&dir);
-    let fake = withings_token_server(SUCCESS_TOKENS);
+    let withings = withings_token_server(SUCCESS_TOKENS);
+    let (sso, diauth) = garmin_servers();
 
     // No stdin: the redirect-code prompt hits EOF.
     let run = run_bin_stdin(
         &["auth", "--config-dir", dir.path().to_str().unwrap()],
-        &auth_env(&fake),
+        &auth_env(&withings, &sso, &diauth),
         None,
     );
 

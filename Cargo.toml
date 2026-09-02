@@ -14,6 +14,7 @@ name = "withings_garmin_sync"
 path = "src/lib.rs"
 
 [dependencies]
+base64 = "0.23.1"
 clap = { version = "4", features = ["derive"] }
 reqwest = { version = "0.13.4", default-features = false, features = ["blocking", "cookies", "form", "json", "rustls"] }
 serde = { version = "1", features = ["derive"] }

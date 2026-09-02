@@ -188,7 +188,10 @@ pub fn form_value<'a>(pairs: &'a [(String, String)], key: &str) -> &'a str {
 #[derive(Debug, Clone)]
 pub struct RecordedRequest {
     pub method: String,
+    /// Path without the query string, e.g. `/mobile/api/login`.
     pub path: String,
+    /// Raw query string (without `?`), e.g. `clientId=GCM_ANDROID_DARK`.
+    pub query: String,
     pub headers: Vec<(String, String)>,
     pub body: String,
 }
@@ -299,6 +302,17 @@ impl FakeServer {
                     Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                         std::thread::sleep(std::time::Duration::from_millis(5));
                     }
+                    // A client can abort a queued connection under parallel
+                    // load (ECONNABORTED/ECONNRESET); that must not kill the
+                    // accept loop. Interrupted accepts likewise continue.
+                    Err(ref e)
+                        if e.kind() == std::io::ErrorKind::ConnectionAborted
+                            || e.kind() == std::io::ErrorKind::ConnectionReset
+                            || e.kind() == std::io::ErrorKind::Interrupted => {}
+                    Err(ref e)
+                        if e.kind() == std::io::ErrorKind::ConnectionAborted
+                            || e.kind() == std::io::ErrorKind::ConnectionReset
+                            || e.kind() == std::io::ErrorKind::Interrupted => {}
                     Err(_) => break,
                 }
             }
@@ -342,6 +356,10 @@ fn handle_connection(
     routes: &[Route],
     requests: &Arc<Mutex<Vec<RecordedRequest>>>,
 ) -> std::io::Result<()> {
+    // On macOS, sockets accepted from a nonblocking listener inherit the
+    // nonblocking flag; put them back in blocking mode (bounded by the read
+    // timeout) so reads wait for the client instead of EAGAIN-ing.
+    stream.set_nonblocking(false)?;
     stream.set_read_timeout(Some(std::time::Duration::from_secs(10)))?;
     let request = read_request(&mut stream)?;
     let recorded = request.clone();
@@ -387,7 +405,11 @@ fn read_request(stream: &mut TcpStream) -> std::io::Result<RecordedRequest> {
     let request_line = lines.next().unwrap_or("");
     let mut parts = request_line.split_whitespace();
     let method = parts.next().unwrap_or("").to_string();
-    let path = parts.next().unwrap_or("").to_string();
+    let target = parts.next().unwrap_or("");
+    let (path, query) = match target.split_once('?') {
+        Some((path, query)) => (path.to_string(), query.to_string()),
+        None => (target.to_string(), String::new()),
+    };
 
     let mut headers = Vec::new();
     let mut content_length = 0usize;
@@ -418,6 +440,7 @@ fn read_request(stream: &mut TcpStream) -> std::io::Result<RecordedRequest> {
     Ok(RecordedRequest {
         method,
         path,
+        query,
         headers,
         body: String::from_utf8_lossy(&body_bytes).into_owned(),
     })

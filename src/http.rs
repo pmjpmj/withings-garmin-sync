@@ -57,16 +57,62 @@ impl HttpClient {
         url: &str,
         fields: &[(String, String)],
     ) -> Result<(u16, String), HttpError> {
-        let response = self
-            .inner
-            .post(url)
-            .form(fields)
+        self.post_form_headers(url, fields, &[], None)
+    }
+
+    /// POST form fields with extra headers and optional HTTP Basic auth.
+    pub fn post_form_headers(
+        &self,
+        url: &str,
+        fields: &[(String, String)],
+        headers: &[(&str, &str)],
+        basic_auth: Option<(&str, &str)>,
+    ) -> Result<(u16, String), HttpError> {
+        let mut request = self.inner.post(url).form(fields);
+        for (name, value) in headers {
+            request = request.header(*name, *value);
+        }
+        if let Some((user, password)) = basic_auth {
+            request = request.basic_auth(user, Some(password));
+        }
+        self.send(request, url)
+    }
+
+    /// POST a JSON body with extra headers.
+    pub fn post_json(
+        &self,
+        url: &str,
+        body: &serde_json::Value,
+        headers: &[(&str, &str)],
+    ) -> Result<(u16, String), HttpError> {
+        let mut request = self.inner.post(url).json(body);
+        for (name, value) in headers {
+            request = request.header(*name, *value);
+        }
+        self.send(request, url)
+    }
+
+    /// GET a URL with extra headers.
+    pub fn get(&self, url: &str, headers: &[(&str, &str)]) -> Result<(u16, String), HttpError> {
+        let mut request = self.inner.get(url);
+        for (name, value) in headers {
+            request = request.header(*name, *value);
+        }
+        self.send(request, url)
+    }
+
+    fn send(
+        &self,
+        request: reqwest::blocking::RequestBuilder,
+        url: &str,
+    ) -> Result<(u16, String), HttpError> {
+        let response = request
             .send()
-            .map_err(|error| HttpError::Transport(format!("POST {url}: {error}")))?;
+            .map_err(|error| HttpError::Transport(format!("{url}: {error}")))?;
         let status = response.status().as_u16();
         let body = response
             .text()
-            .map_err(|error| HttpError::Transport(format!("POST {url}: {error}")))?;
+            .map_err(|error| HttpError::Transport(format!("{url}: {error}")))?;
         Ok((status, body))
     }
 
@@ -111,6 +157,21 @@ impl std::fmt::Display for HttpError {
 }
 
 impl std::error::Error for HttpError {}
+
+/// Percent-encode a value for a URL query string: space as `%20`, everything
+/// outside unreserved characters encoded.
+pub fn query_encode(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(byte as char);
+            }
+            other => out.push_str(&format!("%{other:02X}")),
+        }
+    }
+    out
+}
 
 fn join(base: &str, path: &str) -> String {
     format!(

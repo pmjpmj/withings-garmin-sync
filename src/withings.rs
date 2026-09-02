@@ -23,9 +23,9 @@ pub fn authorize_url(client_id: &str) -> String {
     format!(
         "{}/oauth2_user/authorize2?response_type=code&client_id={}&scope={}&redirect_uri={}",
         AUTHORIZE_HOST,
-        percent_encode(client_id),
-        percent_encode("user.metrics"),
-        percent_encode(REDIRECT_URI),
+        crate::http::query_encode(client_id),
+        crate::http::query_encode("user.metrics"),
+        crate::http::query_encode(REDIRECT_URI),
     )
 }
 
@@ -210,21 +210,6 @@ fn withings_error(status: i64) -> AppError {
         crate::EXIT_AUTH,
         format!("Withings rejected the request: {message}"),
     )
-}
-
-/// Percent-encode a value for a query string (space as `%20`, everything
-/// outside unreserved characters encoded).
-fn percent_encode(value: &str) -> String {
-    let mut out = String::with_capacity(value.len());
-    for byte in value.bytes() {
-        match byte {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                out.push(byte as char);
-            }
-            other => out.push_str(&format!("%{other:02X}")),
-        }
-    }
-    out
 }
 
 #[cfg(test)]
