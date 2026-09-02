@@ -134,6 +134,122 @@ pub fn basic_auth_header(client_id: &str) -> String {
     format!("Basic {encoded}")
 }
 
+// --------------------------------------------------------------------------
+// Write endpoints (ticket 07)
+// --------------------------------------------------------------------------
+
+const WEIGHT_PATH: &str = "/weight-service/user-weight";
+const BP_PATH: &str = "/bloodpressure-service/bloodpressure";
+
+/// Build the weight write payload (shape confirmed live in ticket 01).
+pub fn weight_payload(local: &str, gmt: &str, kg: f64) -> serde_json::Value {
+    serde_json::json!({
+        "dateTimestamp": local,
+        "gmtTimestamp": gmt,
+        "unitKey": "kg",
+        "sourceType": "MANUAL",
+        "value": kg
+    })
+}
+
+/// Build the blood-pressure write payload. `pulse` is omitted when absent;
+/// `notes` is only present when non-empty (always empty here). Whole numbers
+/// go on the wire as JSON integers, matching the spike's observed payloads.
+pub fn bp_payload(
+    local: &str,
+    gmt: &str,
+    systolic: f64,
+    diastolic: f64,
+    pulse: Option<f64>,
+) -> serde_json::Value {
+    fn num(value: f64) -> serde_json::Value {
+        if value.fract() == 0.0 {
+            serde_json::json!(value as i64)
+        } else {
+            serde_json::json!(value)
+        }
+    }
+    let mut payload = serde_json::json!({
+        "measurementTimestampLocal": local,
+        "measurementTimestampGMT": gmt,
+        "systolic": num(systolic),
+        "diastolic": num(diastolic),
+        "sourceType": "MANUAL"
+    });
+    if let Some(pulse) = pulse {
+        payload["pulse"] = num(pulse);
+    }
+    payload
+}
+
+/// POST a JSON payload to a Garmin Connect endpoint with the native Android
+/// header set and a DI Bearer token. Expects the given success status.
+pub fn write_json(
+    client: &HttpClient,
+    path: &str,
+    access_token: &str,
+    payload: &serde_json::Value,
+    success_status: u16,
+) -> Result<(), AppError> {
+    let url = client.garmin_api_url(path);
+    let mut headers: Vec<(&str, &str)> = Vec::new();
+    for (name, value) in native_headers() {
+        if name != "Cache-Control" {
+            headers.push((name, value));
+        }
+    }
+    let auth = format!("Bearer {access_token}");
+    headers.push(("Authorization", auth.as_str()));
+    headers.push(("Content-Type", "application/json"));
+
+    let (status, body) = client.post_json(&url, payload, &headers).map_err(|error| {
+        AppError::new(
+            crate::EXIT_METRIC_FAILURE,
+            format!("write to Garmin {path} failed: {error}"),
+        )
+    })?;
+    if status == success_status {
+        return Ok(());
+    }
+    if status == 412 {
+        return Err(AppError::new(
+            crate::EXIT_METRIC_FAILURE,
+            "Garmin returned HTTP 412 (upload consent required): grant \"upload consent\" \
+             in your Garmin Connect account settings (EU accounts need this), then re-run `sync --apply`"
+                .to_string(),
+        ));
+    }
+    Err(AppError::new(
+        crate::EXIT_METRIC_FAILURE,
+        format!(
+            "write to Garmin {path} failed: HTTP {status}{}",
+            if body.trim().is_empty() {
+                String::new()
+            } else {
+                format!(": {}", body.trim())
+            }
+        ),
+    ))
+}
+
+/// Write one weigh-in. Success is HTTP 204.
+pub fn write_weight(
+    client: &HttpClient,
+    access_token: &str,
+    payload: &serde_json::Value,
+) -> Result<(), AppError> {
+    write_json(client, WEIGHT_PATH, access_token, payload, 204)
+}
+
+/// Write one blood-pressure reading. Success is HTTP 200.
+pub fn write_blood_pressure(
+    client: &HttpClient,
+    access_token: &str,
+    payload: &serde_json::Value,
+) -> Result<(), AppError> {
+    write_json(client, BP_PATH, access_token, payload, 200)
+}
+
 /// Result of the SSO login POST.
 pub enum LoginOutcome {
     Success { service_ticket: String },
@@ -490,5 +606,36 @@ mod tests {
         assert!(error.message.contains("429"), "{}", error.message);
         let error = sso_json(200, r#"{"error":{"status-code":429}}"#, "login").unwrap_err();
         assert!(error.message.contains("429"), "{}", error.message);
+    }
+
+    #[test]
+    fn weight_payload_has_exact_shape() {
+        assert_eq!(
+            weight_payload("2026-01-02T08:30:00.000", "2026-01-02T08:30:00.000", 82.4),
+            serde_json::json!({
+                "dateTimestamp": "2026-01-02T08:30:00.000",
+                "gmtTimestamp": "2026-01-02T08:30:00.000",
+                "unitKey": "kg",
+                "sourceType": "MANUAL",
+                "value": 82.4
+            })
+        );
+    }
+
+    #[test]
+    fn bp_payload_includes_pulse_only_when_present() {
+        assert_eq!(
+            bp_payload("L", "G", 120.0, 80.0, Some(72.0)),
+            serde_json::json!({
+                "measurementTimestampLocal": "L",
+                "measurementTimestampGMT": "G",
+                "systolic": 120,
+                "diastolic": 80,
+                "pulse": 72,
+                "sourceType": "MANUAL"
+            })
+        );
+        let without_pulse = bp_payload("L", "G", 120.0, 80.0, None);
+        assert!(without_pulse.get("pulse").is_none());
     }
 }

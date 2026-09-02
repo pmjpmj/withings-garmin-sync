@@ -17,6 +17,128 @@ pub const AUTHORIZE_HOST: &str = "https://account.withings.com";
 pub const REDIRECT_URI: &str = "http://localhost:8765/";
 
 const TOKEN_PATH: &str = "/v2/oauth2";
+const MEASURE_PATH: &str = "/measure";
+
+/// meastype codes the CLI reads: weight, systolic BP, diastolic BP, pulse.
+pub const MEASURE_TYPES: &str = "1,9,10,11";
+/// Safety cap on pagination, so a misbehaving `more` cannot loop forever.
+const MAX_PAGES: usize = 50;
+
+/// One raw measure inside a Withings measure group.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RawMeasure {
+    /// meastype: 1 = weight (kg), 9 = diastolic BP, 10 = systolic BP, 11 = pulse.
+    pub meastype: u32,
+    pub value: i64,
+    pub unit: i32,
+}
+
+/// A Withings measure group: measures taken at the same time.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MeasureGroup {
+    /// Measurement time, epoch seconds (UTC).
+    pub date: i64,
+    pub measures: Vec<RawMeasure>,
+}
+
+/// Decode a Withings value to its real number: `value * 10^unit`.
+pub fn decode_value(value: i64, unit: i32) -> f64 {
+    value as f64 * 10f64.powi(unit)
+}
+
+/// Read the measurement window from Withings (`action=getmeas`), following
+/// the response's `more`/`offset` fields until there are no more pages.
+pub fn read_measures(
+    client: &HttpClient,
+    access_token: &str,
+    startdate: i64,
+    enddate: i64,
+) -> Result<Vec<MeasureGroup>, AppError> {
+    let url = client.withings_url(MEASURE_PATH);
+    let auth = format!("Bearer {access_token}");
+
+    let mut groups: Vec<MeasureGroup> = Vec::new();
+    let mut offset: u64 = 0;
+    for _page in 0..MAX_PAGES {
+        let fields = vec![
+            ("action".to_string(), "getmeas".to_string()),
+            ("meastypes".to_string(), MEASURE_TYPES.to_string()),
+            ("startdate".to_string(), startdate.to_string()),
+            ("enddate".to_string(), enddate.to_string()),
+            ("offset".to_string(), offset.to_string()),
+        ];
+        let (status, body) = client
+            .post_form_headers(&url, &fields, &[("Authorization", auth.as_str())], None)
+            .map_err(|error| {
+                AppError::new(
+                    crate::EXIT_METRIC_FAILURE,
+                    format!("could not read measurements from Withings: {error}"),
+                )
+            })?;
+        if !(200..300).contains(&status) {
+            return Err(AppError::new(
+                crate::EXIT_METRIC_FAILURE,
+                format!("Withings measurements request returned HTTP {status}"),
+            ));
+        }
+        let json: serde_json::Value = serde_json::from_str(&body).map_err(|error| {
+            AppError::new(
+                crate::EXIT_METRIC_FAILURE,
+                format!("Withings measurements response was invalid JSON: {error}"),
+            )
+        })?;
+        let withings_status = json.get("status").and_then(|v| v.as_i64()).unwrap_or(-1);
+        if withings_status != 0 {
+            return Err(AppError::new(
+                crate::EXIT_METRIC_FAILURE,
+                format!("Withings rejected the measurements request (status {withings_status})"),
+            ));
+        }
+
+        let body = json.get("body").cloned().unwrap_or(serde_json::Value::Null);
+        if let Some(page) = body.get("measuregrps").and_then(|v| v.as_array()) {
+            for group in page {
+                let Some(date) = group.get("date").and_then(|v| v.as_i64()) else {
+                    continue;
+                };
+                let measures = group
+                    .get("measures")
+                    .and_then(|v| v.as_array())
+                    .map(|measures| {
+                        measures
+                            .iter()
+                            .filter_map(|m| {
+                                Some(RawMeasure {
+                                    meastype: m.get("type")?.as_u64()? as u32,
+                                    value: m.get("value")?.as_i64()?,
+                                    unit: m.get("unit")?.as_i64()? as i32,
+                                })
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                groups.push(MeasureGroup { date, measures });
+            }
+        }
+
+        let more = body.get("more").and_then(|v| v.as_u64()).unwrap_or(0);
+        if more == 0 {
+            return Ok(groups);
+        }
+        let next = body.get("offset").and_then(|v| v.as_u64()).unwrap_or(0);
+        if next == offset {
+            // The server says "more" but gave no new offset; stop rather
+            // than loop.
+            return Ok(groups);
+        }
+        offset = next;
+    }
+
+    Err(AppError::new(
+        crate::EXIT_METRIC_FAILURE,
+        format!("Withings pagination did not terminate after {MAX_PAGES} pages"),
+    ))
+}
 
 /// Build the Withings authorize URL for the operator to open in a browser.
 pub fn authorize_url(client_id: &str) -> String {
@@ -273,6 +395,13 @@ mod tests {
                 ("refresh_token".into(), "old-refresh".into()),
             ]
         );
+    }
+
+    #[test]
+    fn decode_value_applies_power_of_ten() {
+        assert_eq!(decode_value(82400, -3), 82.4);
+        assert_eq!(decode_value(120, 0), 120.0);
+        assert_eq!(decode_value(5, 2), 500.0);
     }
 
     #[test]

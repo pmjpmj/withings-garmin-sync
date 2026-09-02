@@ -2,6 +2,8 @@ pub mod cli;
 pub mod config;
 pub mod garmin;
 pub mod http;
+pub mod timefmt;
+pub mod transform;
 pub mod withings;
 
 use std::fs;
@@ -204,8 +206,8 @@ fn run_sync(args: SyncArgs) -> Result<i32, AppError> {
     let dir = config::resolve_config_dir(args.config_dir.as_deref())?;
 
     // Fail fast on missing/invalid config or tokens (exit 3).
-    config::load_config(&dir)?;
-    config::load_tokens(&dir)?;
+    let config = config::load_config(&dir)?;
+    let tokens = config::load_tokens(&dir)?;
 
     let client = http::HttpClient::new(http::BaseUrls::from_env());
     let dry_run = !args.apply;
@@ -220,18 +222,150 @@ fn run_sync(args: SyncArgs) -> Result<i32, AppError> {
         eprintln!("[verbose]   garmin_api    = {}", client.base.garmin_api);
     }
 
-    let window = match (args.since.as_deref(), args.until.as_deref()) {
-        (Some(since), Some(until)) => format!("{since}..{until}"),
-        (Some(since), None) => format!("{since}..now"),
-        (None, Some(until)) => format!("..{until}"),
-        (None, None) => "last 30 days".to_string(),
-    };
-
-    if dry_run {
-        println!("dry-run ({window}): would write 0 weight and 0 blood-pressure measurements");
+    // Resolve the sync window: --since/--until flags win, then the config's
+    // sync.since default, then the built-in last-30-days window.
+    let now = timefmt::now_epoch();
+    let until_flag = args.until.as_deref().map(timefmt::parse_date).transpose()?;
+    let until = until_flag.unwrap_or(now);
+    let default_since = if until_flag.is_some() {
+        0 // `--until` alone means "from the beginning until ..."
     } else {
-        println!("apply ({window}): wrote 0 weight and 0 blood-pressure measurements");
+        now - 30 * 86400
+    };
+    let since_flag = args.since.as_deref().map(timefmt::parse_date).transpose()?;
+    let since = since_flag.or_else(|| {
+        config
+            .sync
+            .since
+            .as_deref()
+            .map(timefmt::parse_date)
+            .transpose()
+            .ok()
+            .flatten()
+    });
+    let since = since.unwrap_or(default_since);
+    if since > until {
+        return Err(AppError::new(
+            EXIT_USAGE,
+            format!("invalid window: --since {since} is after --until {until}"),
+        ));
     }
 
-    Ok(EXIT_OK)
+    let window_label = if since_flag.is_none() && until_flag.is_none() {
+        "last 30 days".to_string()
+    } else {
+        match (since_flag, until_flag) {
+            (Some(_), Some(_)) => format!(
+                "{}..{}",
+                args.since.as_deref().unwrap(),
+                args.until.as_deref().unwrap()
+            ),
+            (Some(_), None) => format!("{}..now", args.since.as_deref().unwrap()),
+            (None, Some(_)) => format!("..{}", args.until.as_deref().unwrap()),
+            (None, None) => "last 30 days".to_string(),
+        }
+    };
+
+    // Read the window from Withings once, then split into the two metrics.
+    let groups = withings::read_measures(&client, &tokens.withings.access_token, since, until)?;
+    let (weights, bps, skips) = transform::transform(groups);
+
+    for skip in &skips {
+        eprintln!(
+            "warning: skipping {} reading at {}: {}",
+            match skip.metric {
+                transform::Metric::Weight => "weight",
+                transform::Metric::BloodPressure => "blood-pressure",
+            },
+            timefmt::local_ms(skip.epoch),
+            skip.reason
+        );
+    }
+
+    if dry_run {
+        println!(
+            "dry-run ({window_label}): would write {} weight and {} blood-pressure measurements",
+            weights.len(),
+            bps.len()
+        );
+        for weight in &weights {
+            println!(
+                "  weight: {} kg at {}",
+                weight.kg,
+                timefmt::local_ms(weight.epoch)
+            );
+        }
+        for bp in &bps {
+            let pulse_part = bp
+                .pulse
+                .map(|p| format!(" (pulse {p})"))
+                .unwrap_or_default();
+            println!(
+                "  blood-pressure: {}/{}{} at {}",
+                bp.systolic,
+                bp.diastolic,
+                pulse_part,
+                timefmt::local_ms(bp.epoch)
+            );
+        }
+        println!("summary: dry-run complete");
+        return Ok(EXIT_OK);
+    }
+
+    // Apply: write each metric independently; one failing does not block the
+    // other.
+    let weight_skips = skips
+        .iter()
+        .filter(|s| s.metric == transform::Metric::Weight)
+        .count();
+    let bp_skips = skips
+        .iter()
+        .filter(|s| s.metric == transform::Metric::BloodPressure)
+        .count();
+
+    let mut weight_failed = 0usize;
+    let mut bp_failed = 0usize;
+    for weight in &weights {
+        let payload = garmin::weight_payload(
+            &timefmt::local_ms(weight.epoch),
+            &timefmt::gmt_ms(weight.epoch),
+            weight.kg,
+        );
+        if let Err(error) = garmin::write_weight(&client, &tokens.garmin.access_token, &payload) {
+            eprintln!("error: weight write failed: {}", error.message);
+            weight_failed += 1;
+        }
+    }
+    for bp in &bps {
+        let payload = garmin::bp_payload(
+            &timefmt::local_ms(bp.epoch),
+            &timefmt::gmt_ms(bp.epoch),
+            bp.systolic,
+            bp.diastolic,
+            bp.pulse,
+        );
+        if let Err(error) =
+            garmin::write_blood_pressure(&client, &tokens.garmin.access_token, &payload)
+        {
+            eprintln!("error: blood-pressure write failed: {}", error.message);
+            bp_failed += 1;
+        }
+    }
+
+    let weight_written = weights.len().saturating_sub(weight_failed);
+    let bp_written = bps.len().saturating_sub(bp_failed);
+    println!(
+        "apply ({window_label}): weight: {weight_written} written, {weight_skips} skipped, {weight_failed} failed"
+    );
+    println!(
+        "apply ({window_label}): blood-pressure: {bp_written} written, {bp_skips} skipped, {bp_failed} failed"
+    );
+
+    if weight_failed > 0 || bp_failed > 0 {
+        println!("summary: 1 metric(s) failed");
+        Ok(EXIT_METRIC_FAILURE)
+    } else {
+        println!("summary: all metrics synced");
+        Ok(EXIT_OK)
+    }
 }

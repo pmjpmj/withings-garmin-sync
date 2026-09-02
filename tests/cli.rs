@@ -6,7 +6,10 @@
 
 mod common;
 
-use common::{run_bin, write_file, write_valid_config_and_tokens, TempDir, VALID_CONFIG};
+use common::{
+    run_bin, write_file, write_valid_config_and_tokens, FakeResponse, FakeServer, Route, TempDir,
+    VALID_CONFIG,
+};
 
 #[test]
 fn help_lists_subcommands_and_flags() {
@@ -140,11 +143,26 @@ fn sync_with_invalid_tokens_exits_3() {
     );
 }
 
+/// A Withings fake with an empty measurement page, so `sync` tests that
+/// exercise the CLI surface (not the sync logic) never touch the network.
+fn empty_withings() -> FakeServer {
+    FakeServer::start(vec![Route::post("/measure", |_req, _i| {
+        FakeResponse::json(
+            200,
+            r#"{"status":0,"body":{"updatetime":1767342600,"timezone":"UTC","measuregrps":[],"more":0,"offset":0}}"#,
+        )
+    })])
+}
+
 #[test]
 fn sync_valid_config_dry_run_succeeds_by_default() {
     let dir = TempDir::new();
     write_valid_config_and_tokens(dir.path());
-    let run = run_bin(&["sync", "--config-dir", dir.path().to_str().unwrap()], &[]);
+    let withings = empty_withings();
+    let run = run_bin(
+        &["sync", "--config-dir", dir.path().to_str().unwrap()],
+        &[("WGS_WITHINGS_API_BASE", withings.base_url.as_str())],
+    );
     assert_eq!(run.code, 0, "stderr: {}", run.stderr);
     assert!(run.stdout.contains("dry-run"), "stdout: {}", run.stdout);
 }
@@ -153,6 +171,7 @@ fn sync_valid_config_dry_run_succeeds_by_default() {
 fn sync_apply_flag_is_accepted() {
     let dir = TempDir::new();
     write_valid_config_and_tokens(dir.path());
+    let withings = empty_withings();
     let run = run_bin(
         &[
             "sync",
@@ -164,7 +183,7 @@ fn sync_apply_flag_is_accepted() {
             "--until",
             "2026-02-01",
         ],
-        &[],
+        &[("WGS_WITHINGS_API_BASE", withings.base_url.as_str())],
     );
     assert_eq!(run.code, 0, "stderr: {}", run.stderr);
     assert!(run.stdout.contains("apply"), "stdout: {}", run.stdout);
@@ -179,6 +198,7 @@ fn sync_apply_flag_is_accepted() {
 fn base_url_overrides_flow_into_the_http_client() {
     let dir = TempDir::new();
     write_valid_config_and_tokens(dir.path());
+    let withings = empty_withings();
     let run = run_bin(
         &[
             "sync",
@@ -187,7 +207,7 @@ fn base_url_overrides_flow_into_the_http_client() {
             dir.path().to_str().unwrap(),
         ],
         &[
-            ("WGS_WITHINGS_API_BASE", "http://127.0.0.1:10001"),
+            ("WGS_WITHINGS_API_BASE", withings.base_url.as_str()),
             ("WGS_GARMIN_SSO_BASE", "http://127.0.0.1:10002"),
             ("WGS_GARMIN_DIAUTH_BASE", "http://127.0.0.1:10003"),
             ("WGS_GARMIN_API_BASE", "http://127.0.0.1:10004"),
@@ -196,7 +216,7 @@ fn base_url_overrides_flow_into_the_http_client() {
     assert_eq!(run.code, 0, "stderr: {}", run.stderr);
     assert!(
         run.stderr
-            .contains("withings_api  = http://127.0.0.1:10001"),
+            .contains(&format!("withings_api  = {}", withings.base_url)),
         "stderr: {}",
         run.stderr
     );
