@@ -182,15 +182,48 @@ pub fn bp_payload(
     payload
 }
 
+/// Failure writing to Garmin Connect: either the token was rejected (the
+/// caller refreshes once and retries), or the write failed for another
+/// reason.
+pub enum WriteFailure {
+    Unauthorized,
+    Failed(AppError),
+}
+
+impl WriteFailure {
+    pub fn message(&self) -> &str {
+        match self {
+            WriteFailure::Unauthorized => "unauthorized (HTTP 401)",
+            WriteFailure::Failed(error) => &error.message,
+        }
+    }
+}
+
+/// Garmin rate-limiting: HTTP status 429, or a JSON body whose
+/// `error.status-code` is `429` (string or number).
+fn is_rate_limited(status: u16, body: &str) -> bool {
+    if status == 429 {
+        return true;
+    }
+    serde_json::from_str::<serde_json::Value>(body)
+        .ok()
+        .and_then(|json| json.pointer("/error/status-code").cloned())
+        .map(|value| value.as_str() == Some("429") || value.as_u64() == Some(429))
+        .unwrap_or(false)
+}
+
 /// POST a JSON payload to a Garmin Connect endpoint with the native Android
 /// header set and a DI Bearer token. Expects the given success status.
+/// `429` (HTTP or JSON-embedded) is retried with backoff; `401` is reported
+/// distinctly so the caller can refresh and retry once; `412` is the EU
+/// upload-consent gate.
 pub fn write_json(
     client: &HttpClient,
     path: &str,
     access_token: &str,
     payload: &serde_json::Value,
     success_status: u16,
-) -> Result<(), AppError> {
+) -> Result<(), WriteFailure> {
     let url = client.garmin_api_url(path);
     let mut headers: Vec<(&str, &str)> = Vec::new();
     for (name, value) in native_headers() {
@@ -202,24 +235,29 @@ pub fn write_json(
     headers.push(("Authorization", auth.as_str()));
     headers.push(("Content-Type", "application/json"));
 
-    let (status, body) = client.post_json(&url, payload, &headers).map_err(|error| {
-        AppError::new(
-            crate::EXIT_METRIC_FAILURE,
-            format!("write to Garmin {path} failed: {error}"),
-        )
+    let (status, body) = retry_on_429(3, || {
+        client.post_json(&url, payload, &headers).map_err(|error| {
+            WriteFailure::Failed(AppError::new(
+                crate::EXIT_METRIC_FAILURE,
+                format!("write to Garmin {path} failed: {error}"),
+            ))
+        })
     })?;
     if status == success_status {
         return Ok(());
     }
+    if status == 401 {
+        return Err(WriteFailure::Unauthorized);
+    }
     if status == 412 {
-        return Err(AppError::new(
+        return Err(WriteFailure::Failed(AppError::new(
             crate::EXIT_METRIC_FAILURE,
             "Garmin returned HTTP 412 (upload consent required): grant \"upload consent\" \
              in your Garmin Connect account settings (EU accounts need this), then re-run `sync --apply`"
                 .to_string(),
-        ));
+        )));
     }
-    Err(AppError::new(
+    Err(WriteFailure::Failed(AppError::new(
         crate::EXIT_METRIC_FAILURE,
         format!(
             "write to Garmin {path} failed: HTTP {status}{}",
@@ -229,7 +267,26 @@ pub fn write_json(
                 format!(": {}", body.trim())
             }
         ),
-    ))
+    )))
+}
+
+/// Run `operation` up to `attempts` times, sleeping with backoff while the
+/// result is a Garmin 429 (HTTP status or JSON-embedded). The operation's
+/// result is `(status, body)`.
+fn retry_on_429(
+    attempts: u32,
+    mut operation: impl FnMut() -> Result<(u16, String), WriteFailure>,
+) -> Result<(u16, String), WriteFailure> {
+    let mut attempt: u32 = 0;
+    loop {
+        let result = operation()?;
+        if is_rate_limited(result.0, &result.1) && attempt + 1 < attempts {
+            attempt += 1;
+            crate::http::backoff(attempt);
+            continue;
+        }
+        return Ok(result);
+    }
 }
 
 /// Write one weigh-in. Success is HTTP 204.
@@ -237,7 +294,7 @@ pub fn write_weight(
     client: &HttpClient,
     access_token: &str,
     payload: &serde_json::Value,
-) -> Result<(), AppError> {
+) -> Result<(), WriteFailure> {
     write_json(client, WEIGHT_PATH, access_token, payload, 204)
 }
 
@@ -246,7 +303,7 @@ pub fn write_blood_pressure(
     client: &HttpClient,
     access_token: &str,
     payload: &serde_json::Value,
-) -> Result<(), AppError> {
+) -> Result<(), WriteFailure> {
     write_json(client, BP_PATH, access_token, payload, 200)
 }
 
@@ -397,7 +454,8 @@ pub fn exchange_service_ticket(client: &HttpClient, ticket: &str) -> Result<DiTo
     ))
 }
 
-/// Stage C: refresh a DI token pair with the stored refresh token.
+/// Stage C: refresh a DI token pair with the stored refresh token. Garmin
+/// `429` responses are retried with backoff.
 pub fn refresh(
     client: &HttpClient,
     client_id: &str,
@@ -410,15 +468,32 @@ pub fn refresh(
         ));
     }
     let url = client.garmin_diauth_url(DI_TOKEN_PATH);
-    let (status, body) = client
-        .post_form_headers(
-            &url,
-            &refresh_form(client_id, refresh_token),
-            &native_headers(),
-            Some((client_id, "")),
-        )
-        .map_err(transport_error)?;
-    parse_di_response(status, &body, client_id)
+    let mut attempt: u32 = 0;
+    loop {
+        let result = client
+            .post_form_headers(
+                &url,
+                &refresh_form(client_id, refresh_token),
+                &native_headers(),
+                Some((client_id, "")),
+            )
+            .map_err(transport_error)
+            .and_then(|(status, body)| {
+                if is_rate_limited(status, &body) && attempt + 1 < 3 {
+                    Ok(None)
+                } else {
+                    parse_di_response(status, &body, client_id).map(Some)
+                }
+            });
+        match result {
+            Ok(Some(tokens)) => return Ok(tokens),
+            Ok(None) => {
+                attempt += 1;
+                crate::http::backoff(attempt);
+            }
+            Err(error) => return Err(error),
+        }
+    }
 }
 
 fn parse_di_response(status: u16, body: &str, client_id: &str) -> Result<DiTokens, AppError> {

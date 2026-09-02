@@ -93,7 +93,7 @@ fn run_auth(args: AuthArgs) -> Result<i32, AppError> {
     }
     config::write_config(&config_path, &config)?;
 
-    let client = http::HttpClient::new(http::BaseUrls::from_env());
+    let client = http::HttpClient::new(http::BaseUrls::from_env()).with_verbose(args.verbose);
     if args.verbose {
         eprintln!("[verbose] config dir: {}", dir.display());
         eprintln!("[verbose] HTTP base URLs:");
@@ -183,6 +183,67 @@ fn run_auth(args: AuthArgs) -> Result<i32, AppError> {
     Ok(EXIT_OK)
 }
 
+/// Mutable Garmin DI token state for one sync run.
+struct GarminTokenState {
+    access_token: String,
+    refresh_token: String,
+    client_id: String,
+}
+
+/// Write one Garmin record. A `401` triggers a DI token refresh (persisted)
+/// followed by a single retry; a rejected refresh is returned as an auth
+/// error (`EXIT_AUTH`) so the run aborts with "re-run `auth`".
+fn garmin_write<F>(
+    client: &http::HttpClient,
+    state: &mut GarminTokenState,
+    payload: &serde_json::Value,
+    tokens_path: &std::path::Path,
+    tokens: &mut config::Tokens,
+    write: F,
+) -> Result<(), AppError>
+where
+    F: Fn(&http::HttpClient, &str, &serde_json::Value) -> Result<(), garmin::WriteFailure>,
+{
+    match write(client, &state.access_token, payload) {
+        Ok(()) => Ok(()),
+        Err(garmin::WriteFailure::Unauthorized) => {
+            let refreshed = garmin::refresh(client, &state.client_id, &state.refresh_token)
+                .map_err(|error| {
+                    AppError::new(
+                        EXIT_AUTH,
+                        format!(
+                            "Garmin token refresh failed: {}; re-run `auth`",
+                            error.message
+                        ),
+                    )
+                })?;
+            state.access_token = refreshed.access_token;
+            if let Some(rotate) = refreshed.refresh_token {
+                state.refresh_token = rotate;
+            }
+            tokens.garmin = config::GarminTokens {
+                access_token: state.access_token.clone(),
+                refresh_token: state.refresh_token.clone(),
+                client_id: Some(state.client_id.clone()),
+            };
+            config::write_tokens(tokens_path, tokens)?;
+
+            // The single retry with the fresh token.
+            match write(client, &state.access_token, payload) {
+                Ok(()) => Ok(()),
+                Err(failure) => Err(AppError::new(
+                    EXIT_METRIC_FAILURE,
+                    failure.message().to_string(),
+                )),
+            }
+        }
+        Err(failure) => Err(AppError::new(
+            EXIT_METRIC_FAILURE,
+            failure.message().to_string(),
+        )),
+    }
+}
+
 /// Read one line of operator input, prompting on stderr so stdout stays
 /// report-only. Empty input (closed stdin) is an auth error.
 fn prompt_line(label: &str) -> Result<String, AppError> {
@@ -207,9 +268,9 @@ fn run_sync(args: SyncArgs) -> Result<i32, AppError> {
 
     // Fail fast on missing/invalid config or tokens (exit 3).
     let config = config::load_config(&dir)?;
-    let tokens = config::load_tokens(&dir)?;
+    let mut tokens = config::load_tokens(&dir)?;
 
-    let client = http::HttpClient::new(http::BaseUrls::from_env());
+    let client = http::HttpClient::new(http::BaseUrls::from_env()).with_verbose(args.verbose);
     let dry_run = !args.apply;
     let _ = args.dry_run; // `--dry-run` is the default and conflicts with `--apply`.
 
@@ -220,6 +281,38 @@ fn run_sync(args: SyncArgs) -> Result<i32, AppError> {
         eprintln!("[verbose]   garmin_sso    = {}", client.base.garmin_sso);
         eprintln!("[verbose]   garmin_diauth = {}", client.base.garmin_diauth);
         eprintln!("[verbose]   garmin_api    = {}", client.base.garmin_api);
+    }
+
+    // Refresh an expired Withings access token before reads begin; a rejected
+    // refresh is an auth failure (exit 4) and aborts the run.
+    let now_epoch = timefmt::now_epoch();
+    let expired = tokens
+        .withings
+        .expires_at
+        .map(|expires| expires <= now_epoch as u64 + 60)
+        .unwrap_or(true);
+    if expired {
+        let refreshed = withings::refresh(
+            &client,
+            &config.withings.client_id,
+            &config.withings.client_secret,
+            &tokens.withings.refresh_token,
+        )
+        .map_err(|error| {
+            AppError::new(
+                EXIT_AUTH,
+                format!(
+                    "Withings token refresh failed: {}; re-run `auth`",
+                    error.message
+                ),
+            )
+        })?;
+        tokens.withings.access_token = refreshed.access_token;
+        if let Some(rotate) = refreshed.refresh_token {
+            tokens.withings.refresh_token = rotate;
+        }
+        tokens.withings.expires_at = Some(timefmt::now_epoch() as u64 + refreshed.expires_in);
+        config::write_tokens(&config::tokens_path(&dir), &tokens)?;
     }
 
     // Resolve the sync window: --since/--until flags win, then the config's
@@ -313,7 +406,7 @@ fn run_sync(args: SyncArgs) -> Result<i32, AppError> {
     }
 
     // Apply: write each metric independently; one failing does not block the
-    // other.
+    // other. A 401 refreshes the Garmin DI token once and retries.
     let weight_skips = skips
         .iter()
         .filter(|s| s.metric == transform::Metric::Weight)
@@ -323,6 +416,13 @@ fn run_sync(args: SyncArgs) -> Result<i32, AppError> {
         .filter(|s| s.metric == transform::Metric::BloodPressure)
         .count();
 
+    let tokens_path = config::tokens_path(&dir);
+    let mut garmin_state = GarminTokenState {
+        access_token: tokens.garmin.access_token.clone(),
+        refresh_token: tokens.garmin.refresh_token.clone(),
+        client_id: tokens.garmin.client_id.clone().unwrap_or_default(),
+    };
+
     let mut weight_failed = 0usize;
     let mut bp_failed = 0usize;
     for weight in &weights {
@@ -331,9 +431,20 @@ fn run_sync(args: SyncArgs) -> Result<i32, AppError> {
             &timefmt::gmt_ms(weight.epoch),
             weight.kg,
         );
-        if let Err(error) = garmin::write_weight(&client, &tokens.garmin.access_token, &payload) {
-            eprintln!("error: weight write failed: {}", error.message);
-            weight_failed += 1;
+        match garmin_write(
+            &client,
+            &mut garmin_state,
+            &payload,
+            &tokens_path,
+            &mut tokens,
+            garmin::write_weight,
+        ) {
+            Ok(()) => {}
+            Err(error) if error.code == EXIT_AUTH => return Err(error),
+            Err(error) => {
+                eprintln!("error: weight write failed: {}", error.message);
+                weight_failed += 1;
+            }
         }
     }
     for bp in &bps {
@@ -344,11 +455,20 @@ fn run_sync(args: SyncArgs) -> Result<i32, AppError> {
             bp.diastolic,
             bp.pulse,
         );
-        if let Err(error) =
-            garmin::write_blood_pressure(&client, &tokens.garmin.access_token, &payload)
-        {
-            eprintln!("error: blood-pressure write failed: {}", error.message);
-            bp_failed += 1;
+        match garmin_write(
+            &client,
+            &mut garmin_state,
+            &payload,
+            &tokens_path,
+            &mut tokens,
+            garmin::write_blood_pressure,
+        ) {
+            Ok(()) => {}
+            Err(error) if error.code == EXIT_AUTH => return Err(error),
+            Err(error) => {
+                eprintln!("error: blood-pressure write failed: {}", error.message);
+                bp_failed += 1;
+            }
         }
     }
 

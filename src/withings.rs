@@ -46,8 +46,33 @@ pub fn decode_value(value: i64, unit: i32) -> f64 {
     value as f64 * 10f64.powi(unit)
 }
 
+/// Withings signals rate-limiting as HTTP status 601 (per their docs).
+fn is_rate_limited(status: u16) -> bool {
+    status == 601
+}
+
+/// Run `operation` up to `attempts` times, sleeping with backoff while the
+/// result carries a Withings 601 status. The final attempt's result is
+/// returned as-is (601 included) for the caller to report.
+fn post_with_601_retry<T>(
+    attempts: u32,
+    mut operation: impl FnMut() -> Result<(u16, T), AppError>,
+) -> Result<(u16, T), AppError> {
+    let mut attempt: u32 = 0;
+    loop {
+        let result = operation()?;
+        if is_rate_limited(result.0) && attempt + 1 < attempts {
+            attempt += 1;
+            crate::http::backoff(attempt);
+            continue;
+        }
+        return Ok(result);
+    }
+}
+
 /// Read the measurement window from Withings (`action=getmeas`), following
 /// the response's `more`/`offset` fields until there are no more pages.
+/// Withings `601` rate-limit responses are retried with backoff.
 pub fn read_measures(
     client: &HttpClient,
     access_token: &str,
@@ -67,14 +92,19 @@ pub fn read_measures(
             ("enddate".to_string(), enddate.to_string()),
             ("offset".to_string(), offset.to_string()),
         ];
-        let (status, body) = client
-            .post_form_headers(&url, &fields, &[("Authorization", auth.as_str())], None)
-            .map_err(|error| {
-                AppError::new(
-                    crate::EXIT_METRIC_FAILURE,
-                    format!("could not read measurements from Withings: {error}"),
-                )
-            })?;
+
+        // Withings `601` (rate-limited) is retried with backoff, then the
+        // response is parsed like any other page.
+        let (status, body) = post_with_601_retry(3, || {
+            client
+                .post_form_headers(&url, &fields, &[("Authorization", auth.as_str())], None)
+                .map_err(|error| {
+                    AppError::new(
+                        crate::EXIT_METRIC_FAILURE,
+                        format!("could not read measurements from Withings: {error}"),
+                    )
+                })
+        })?;
         if !(200..300).contains(&status) {
             return Err(AppError::new(
                 crate::EXIT_METRIC_FAILURE,
@@ -250,9 +280,9 @@ pub fn refresh(
 ) -> Result<TokenResponse, AppError> {
     let url = client.withings_url(TOKEN_PATH);
     let fields = refresh_form(client_id, client_secret, refresh_token);
-    let (status, body) = client
-        .post_form(&url, &fields)
-        .map_err(map_transport_error)?;
+    let (status, body) = post_with_601_retry(3, || {
+        client.post_form(&url, &fields).map_err(map_transport_error)
+    })?;
     parse_token_response(status, &body)
 }
 

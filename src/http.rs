@@ -33,11 +33,13 @@ fn env_base(name: &str, default: &str) -> String {
 }
 
 /// Owns the configured base URLs and the shared HTTP client (with a cookie
-/// jar, for the Garmin SSO handshake).
+/// jar, for the Garmin SSO handshake). When `verbose` is set, every request
+/// and response is logged to stderr.
 #[derive(Clone, Debug)]
 pub struct HttpClient {
     pub base: BaseUrls,
     inner: reqwest::blocking::Client,
+    verbose: bool,
 }
 
 impl HttpClient {
@@ -47,7 +49,30 @@ impl HttpClient {
             .timeout(std::time::Duration::from_secs(30))
             .build()
             .expect("build HTTP client");
-        Self { base, inner }
+        Self {
+            base,
+            inner,
+            verbose: false,
+        }
+    }
+
+    pub fn with_verbose(mut self, verbose: bool) -> Self {
+        self.verbose = verbose;
+        self
+    }
+
+    fn log_request(&self, method: &str, url: &str, headers: &[(&str, &str)], body: &str) {
+        if !self.verbose {
+            return;
+        }
+        eprintln!("[verbose] -> {method} {url}");
+        for (name, value) in headers {
+            eprintln!("[verbose]    {name}: {value}");
+        }
+        if !body.is_empty() {
+            let preview: String = body.chars().take(300).collect();
+            eprintln!("[verbose]    body: {preview}");
+        }
     }
 
     /// POST `application/x-www-form-urlencoded` fields to `url`; returns the
@@ -68,6 +93,12 @@ impl HttpClient {
         headers: &[(&str, &str)],
         basic_auth: Option<(&str, &str)>,
     ) -> Result<(u16, String), HttpError> {
+        let body: String = fields
+            .iter()
+            .map(|(k, v)| format!("{k}={v}"))
+            .collect::<Vec<_>>()
+            .join("&");
+        self.log_request("POST", url, headers, &body);
         let mut request = self.inner.post(url).form(fields);
         for (name, value) in headers {
             request = request.header(*name, *value);
@@ -85,6 +116,8 @@ impl HttpClient {
         body: &serde_json::Value,
         headers: &[(&str, &str)],
     ) -> Result<(u16, String), HttpError> {
+        let body_text = serde_json::to_string(body).unwrap_or_default();
+        self.log_request("POST", url, headers, &body_text);
         let mut request = self.inner.post(url).json(body);
         for (name, value) in headers {
             request = request.header(*name, *value);
@@ -94,6 +127,7 @@ impl HttpClient {
 
     /// GET a URL with extra headers.
     pub fn get(&self, url: &str, headers: &[(&str, &str)]) -> Result<(u16, String), HttpError> {
+        self.log_request("GET", url, headers, "");
         let mut request = self.inner.get(url);
         for (name, value) in headers {
             request = request.header(*name, *value);
@@ -113,6 +147,13 @@ impl HttpClient {
         let body = response
             .text()
             .map_err(|error| HttpError::Transport(format!("{url}: {error}")))?;
+        if self.verbose {
+            let preview: String = body.chars().take(300).collect();
+            eprintln!("[verbose] <- HTTP {status} {url}");
+            if !preview.trim().is_empty() {
+                eprintln!("[verbose]    body: {preview}");
+            }
+        }
         Ok((status, body))
     }
 
@@ -157,6 +198,13 @@ impl std::fmt::Display for HttpError {
 }
 
 impl std::error::Error for HttpError {}
+
+/// Exponential backoff sleep: 200ms * 2^attempt. Kept small so tests stay
+/// fast while still giving a busy server a moment to recover.
+pub fn backoff(attempt: u32) {
+    let millis = 200u64.saturating_mul(2u64.saturating_pow(attempt.min(6)));
+    std::thread::sleep(std::time::Duration::from_millis(millis));
+}
 
 /// Percent-encode a value for a URL query string: space as `%20`, everything
 /// outside unreserved characters encoded.
