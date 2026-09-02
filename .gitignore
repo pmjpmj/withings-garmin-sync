@@ -1,0 +1,10 @@
+# Build output
+/target
+
+# Spike harness state — never commit tokens, cookie jars, credentials, or responses.
+.scratch/withings-garmin-sync/spike/EMAIL
+.scratch/withings-garmin-sync/spike/PASSWORD
+.scratch/withings-garmin-sync/spike/tokens.env
+.scratch/withings-garmin-sync/spike/cookies.txt
+.scratch/withings-garmin-sync/spike/*.json
+.scratch/withings-garmin-sync/spike/transcript.log

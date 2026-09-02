@@ -1,0 +1,22 @@
+[package]
+name = "withings-garmin-sync"
+version = "0.1.0"
+edition = "2021"
+description = "One-shot CLI that syncs Withings body weight and blood pressure into Garmin Connect"
+license = "MIT OR Apache-2.0"
+
+[[bin]]
+name = "withings-garmin-sync"
+path = "src/main.rs"
+
+[lib]
+name = "withings_garmin_sync"
+path = "src/lib.rs"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+
+[dev-dependencies]
