@@ -57,8 +57,10 @@ pub struct WithingsTokens {
     pub access_token: String,
     #[serde(default)]
     pub refresh_token: String,
+    /// Access-token expiry as Unix epoch seconds (computed at exchange/refresh
+    /// time from Withings' `expires_in`), so `sync` can refresh before reads.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub expires_at: Option<String>,
+    pub expires_at: Option<u64>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
