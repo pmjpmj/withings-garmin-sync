@@ -30,3 +30,12 @@ Implemented in `src/lib.rs` (orchestration), `src/http.rs` (verbose logging + ba
 - [ ] The Garmin `412` EU upload-consent gate surfaces a specific, actionable message telling the operator to grant upload consent in Garmin Connect settings.
 - [ ] `--verbose` logs each request and response.
 - [ ] Tests assert retry/backoff and consent-message behavior against fake servers that return those statuses.
+
+## Comments
+
+### Code-review fixes (post-implementation)
+
+- **P1 fixed:** a persistent Garmin 429 delivered as HTTP 200 with a JSON `error.status-code` is no longer counted as a successful write — `write_json` re-checks the body after retries exhaust and counts a failure (regression test `persistent_json_429_is_failure_not_success`).
+- Retry/backoff now also covers the `auth` command's calls: Withings 601 on the code exchange, and Garmin 429 (HTTP or JSON) on SSO login, MFA verify, and the DI service-ticket exchange.
+- An incomplete `tokens.json` (e.g. `{}`, missing access tokens or client id) now exits `3` with "run `auth` first" instead of failing later with `4`.
+- Refactors: one shared `http::retry` helper replaces the three ad-hoc retry loops; the verbose base-URL dump moved to `HttpClient::log_base_urls`; `json_number` renamed from `num`; removed a dead duplicated match arm in the test server.

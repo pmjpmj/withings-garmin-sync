@@ -51,23 +51,11 @@ fn is_rate_limited(status: u16) -> bool {
     status == 601
 }
 
-/// Run `operation` up to `attempts` times, sleeping with backoff while the
-/// result carries a Withings 601 status. The final attempt's result is
-/// returned as-is (601 included) for the caller to report.
+/// Run a Withings POST up to 3 times, retrying 601s with backoff.
 fn post_with_601_retry<T>(
-    attempts: u32,
-    mut operation: impl FnMut() -> Result<(u16, T), AppError>,
+    operation: impl FnMut() -> Result<(u16, T), AppError>,
 ) -> Result<(u16, T), AppError> {
-    let mut attempt: u32 = 0;
-    loop {
-        let result = operation()?;
-        if is_rate_limited(result.0) && attempt + 1 < attempts {
-            attempt += 1;
-            crate::http::backoff(attempt);
-            continue;
-        }
-        return Ok(result);
-    }
+    crate::http::retry(3, |(status, _)| is_rate_limited(*status), operation)
 }
 
 /// Read the measurement window from Withings (`action=getmeas`), following
@@ -95,7 +83,7 @@ pub fn read_measures(
 
         // Withings `601` (rate-limited) is retried with backoff, then the
         // response is parsed like any other page.
-        let (status, body) = post_with_601_retry(3, || {
+        let (status, body) = post_with_601_retry(|| {
             client
                 .post_form_headers(&url, &fields, &[("Authorization", auth.as_str())], None)
                 .map_err(|error| {
@@ -256,7 +244,8 @@ pub struct TokenResponse {
     pub expires_in: u64,
 }
 
-/// Exchange an authorization code for Withings tokens.
+/// Exchange an authorization code for Withings tokens. `601` rate-limit
+/// responses are retried with backoff.
 pub fn exchange_code(
     client: &HttpClient,
     client_id: &str,
@@ -265,13 +254,13 @@ pub fn exchange_code(
 ) -> Result<TokenResponse, AppError> {
     let url = client.withings_url(TOKEN_PATH);
     let fields = exchange_form(client_id, client_secret, code, REDIRECT_URI);
-    let (status, body) = client
-        .post_form(&url, &fields)
-        .map_err(map_transport_error)?;
+    let (status, body) =
+        post_with_601_retry(|| client.post_form(&url, &fields).map_err(map_transport_error))?;
     parse_token_response(status, &body)
 }
 
-/// Refresh Withings tokens with a stored refresh token.
+/// Refresh Withings tokens with a stored refresh token. `601` rate-limit
+/// responses are retried with backoff.
 pub fn refresh(
     client: &HttpClient,
     client_id: &str,
@@ -280,9 +269,8 @@ pub fn refresh(
 ) -> Result<TokenResponse, AppError> {
     let url = client.withings_url(TOKEN_PATH);
     let fields = refresh_form(client_id, client_secret, refresh_token);
-    let (status, body) = post_with_601_retry(3, || {
-        client.post_form(&url, &fields).map_err(map_transport_error)
-    })?;
+    let (status, body) =
+        post_with_601_retry(|| client.post_form(&url, &fields).map_err(map_transport_error))?;
     parse_token_response(status, &body)
 }
 

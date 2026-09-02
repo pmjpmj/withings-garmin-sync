@@ -235,14 +235,26 @@ pub fn write_json(
     headers.push(("Authorization", auth.as_str()));
     headers.push(("Content-Type", "application/json"));
 
-    let (status, body) = retry_on_429(3, || {
-        client.post_json(&url, payload, &headers).map_err(|error| {
-            WriteFailure::Failed(AppError::new(
-                crate::EXIT_METRIC_FAILURE,
-                format!("write to Garmin {path} failed: {error}"),
-            ))
-        })
-    })?;
+    let (status, body) = crate::http::retry(
+        3,
+        |(status, body): &(u16, String)| is_rate_limited(*status, body),
+        || {
+            client.post_json(&url, payload, &headers).map_err(|error| {
+                WriteFailure::Failed(AppError::new(
+                    crate::EXIT_METRIC_FAILURE,
+                    format!("write to Garmin {path} failed: {error}"),
+                ))
+            })
+        },
+    )?;
+    if is_rate_limited(status, &body) {
+        // Retries exhausted while still rate-limited (possibly a 200 whose
+        // JSON body carries a 429) — this write did not succeed.
+        return Err(WriteFailure::Failed(AppError::new(
+            crate::EXIT_METRIC_FAILURE,
+            "Garmin is rate-limiting writes (429); try again later",
+        )));
+    }
     if status == success_status {
         return Ok(());
     }
@@ -268,25 +280,6 @@ pub fn write_json(
             }
         ),
     )))
-}
-
-/// Run `operation` up to `attempts` times, sleeping with backoff while the
-/// result is a Garmin 429 (HTTP status or JSON-embedded). The operation's
-/// result is `(status, body)`.
-fn retry_on_429(
-    attempts: u32,
-    mut operation: impl FnMut() -> Result<(u16, String), WriteFailure>,
-) -> Result<(u16, String), WriteFailure> {
-    let mut attempt: u32 = 0;
-    loop {
-        let result = operation()?;
-        if is_rate_limited(result.0, &result.1) && attempt + 1 < attempts {
-            attempt += 1;
-            crate::http::backoff(attempt);
-            continue;
-        }
-        return Ok(result);
-    }
 }
 
 /// Write one weigh-in. Success is HTTP 204.
@@ -344,13 +337,19 @@ pub fn login(
         ));
     }
 
-    let (status, body) = client
-        .post_json(
-            &login_url(&client.base.garmin_sso),
-            &login_json(username, password),
-            &sso_headers,
-        )
-        .map_err(transport_error)?;
+    let (status, body) = crate::http::retry(
+        3,
+        |(status, body): &(u16, String)| is_rate_limited(*status, body),
+        || {
+            client
+                .post_json(
+                    &login_url(&client.base.garmin_sso),
+                    &login_json(username, password),
+                    &sso_headers,
+                )
+                .map_err(transport_error)
+        },
+    )?;
     let body = sso_json(status, &body, "login")?;
 
     let response_type = body
@@ -390,13 +389,19 @@ pub fn login(
 
 /// One MFA verify attempt. `InvalidCode` means the operator gets to try again.
 pub fn verify_mfa(client: &HttpClient, method: &str, code: &str) -> Result<MfaOutcome, AppError> {
-    let (status, body) = client
-        .post_json(
-            &mfa_url(&client.base.garmin_sso),
-            &verify_json(method, code),
-            &sso_headers(),
-        )
-        .map_err(transport_error)?;
+    let (status, body) = crate::http::retry(
+        3,
+        |(status, body): &(u16, String)| is_rate_limited(*status, body),
+        || {
+            client
+                .post_json(
+                    &mfa_url(&client.base.garmin_sso),
+                    &verify_json(method, code),
+                    &sso_headers(),
+                )
+                .map_err(transport_error)
+        },
+    )?;
     let body = sso_json(status, &body, "MFA verification")?;
 
     let response_type = body
@@ -425,19 +430,25 @@ pub fn exchange_service_ticket(client: &HttpClient, ticket: &str) -> Result<DiTo
     let mut last_error: Option<String> = None;
     for candidate in DI_CLIENT_IDS {
         let url = client.garmin_diauth_url(DI_TOKEN_PATH);
-        let (status, body) = client
-            .post_form_headers(
-                &url,
-                &token_form(candidate, ticket),
-                &native_headers(),
-                Some((candidate, "")),
-            )
-            .map_err(transport_error)?;
-        if status == 429 {
+        let (status, body) = crate::http::retry(
+            3,
+            |(status, body): &(u16, String)| is_rate_limited(*status, body),
+            || {
+                client
+                    .post_form_headers(
+                        &url,
+                        &token_form(candidate, ticket),
+                        &native_headers(),
+                        Some((candidate, "")),
+                    )
+                    .map_err(transport_error)
+            },
+        )?;
+        if is_rate_limited(status, &body) {
             // Rate limiting ends the retry walk immediately.
             return Err(AppError::new(
                 crate::EXIT_AUTH,
-                "Garmin rate-limited the DI token exchange (HTTP 429); try again later",
+                "Garmin rate-limited the DI token exchange (429); try again later",
             ));
         }
         match parse_di_response(status, &body, candidate) {
@@ -468,32 +479,21 @@ pub fn refresh(
         ));
     }
     let url = client.garmin_diauth_url(DI_TOKEN_PATH);
-    let mut attempt: u32 = 0;
-    loop {
-        let result = client
-            .post_form_headers(
-                &url,
-                &refresh_form(client_id, refresh_token),
-                &native_headers(),
-                Some((client_id, "")),
-            )
-            .map_err(transport_error)
-            .and_then(|(status, body)| {
-                if is_rate_limited(status, &body) && attempt + 1 < 3 {
-                    Ok(None)
-                } else {
-                    parse_di_response(status, &body, client_id).map(Some)
-                }
-            });
-        match result {
-            Ok(Some(tokens)) => return Ok(tokens),
-            Ok(None) => {
-                attempt += 1;
-                crate::http::backoff(attempt);
-            }
-            Err(error) => return Err(error),
-        }
-    }
+    let (status, body) = crate::http::retry(
+        3,
+        |(status, body): &(u16, String)| is_rate_limited(*status, body),
+        || {
+            client
+                .post_form_headers(
+                    &url,
+                    &refresh_form(client_id, refresh_token),
+                    &native_headers(),
+                    Some((client_id, "")),
+                )
+                .map_err(transport_error)
+        },
+    )?;
+    parse_di_response(status, &body, client_id)
 }
 
 fn parse_di_response(status: u16, body: &str, client_id: &str) -> Result<DiTokens, AppError> {

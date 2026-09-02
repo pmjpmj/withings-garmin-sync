@@ -75,6 +75,18 @@ impl HttpClient {
         }
     }
 
+    /// Log the configured base URLs in verbose mode.
+    pub fn log_base_urls(&self) {
+        if !self.verbose {
+            return;
+        }
+        eprintln!("[verbose] HTTP base URLs:");
+        eprintln!("[verbose]   withings_api  = {}", self.base.withings_api);
+        eprintln!("[verbose]   garmin_sso    = {}", self.base.garmin_sso);
+        eprintln!("[verbose]   garmin_diauth = {}", self.base.garmin_diauth);
+        eprintln!("[verbose]   garmin_api    = {}", self.base.garmin_api);
+    }
+
     /// POST `application/x-www-form-urlencoded` fields to `url`; returns the
     /// response status and body text. Transport errors are surfaced as-is.
     pub fn post_form(
@@ -204,6 +216,26 @@ impl std::error::Error for HttpError {}
 pub fn backoff(attempt: u32) {
     let millis = 200u64.saturating_mul(2u64.saturating_pow(attempt.min(6)));
     std::thread::sleep(std::time::Duration::from_millis(millis));
+}
+
+/// Run `operation` up to `attempts` times, sleeping with backoff before each
+/// retry while `should_retry(&result)` is true. The final attempt's result is
+/// returned as-is for the caller to report.
+pub fn retry<T, E>(
+    attempts: u32,
+    should_retry: impl Fn(&T) -> bool,
+    mut operation: impl FnMut() -> Result<T, E>,
+) -> Result<T, E> {
+    let mut attempt: u32 = 0;
+    loop {
+        let result = operation()?;
+        if should_retry(&result) && attempt + 1 < attempts {
+            attempt += 1;
+            backoff(attempt);
+            continue;
+        }
+        return Ok(result);
+    }
 }
 
 /// Percent-encode a value for a URL query string: space as `%20`, everything

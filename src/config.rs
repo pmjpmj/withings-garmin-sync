@@ -16,8 +16,8 @@ pub struct Config {
 }
 
 impl Config {
-    /// The placeholder config `auth` writes in this walking-skeleton ticket.
-    /// Tickets 05/06 replace it with real, operator-supplied credentials.
+    /// The starting config `auth` seeds when none exists yet: empty Withings
+    /// credentials (prompted for by `auth`) and default sync settings.
     pub fn skeleton() -> Self {
         Self {
             withings: WithingsConfig {
@@ -39,8 +39,6 @@ pub struct WithingsConfig {
 pub struct SyncConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub since: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub until: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

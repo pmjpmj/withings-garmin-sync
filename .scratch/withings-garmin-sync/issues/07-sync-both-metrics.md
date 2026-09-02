@@ -35,3 +35,10 @@ Implemented across `src/withings.rs` (read), `src/transform.rs` (decode/pair/ran
 - [ ] Out-of-range readings (systolic 70–260, diastolic 40–150, pulse 20–250) are skipped with a warning rather than aborting the run.
 - [ ] The final report counts written/skipped/failed per metric and sets exit `0` (both metrics ok) or `1` (any metric failed).
 - [ ] Tests assert end-to-end against fake Withings + Garmin servers: request traffic, the report, exit codes, and that a re-run does not duplicate entries.
+
+## Comments
+
+### Code-review fixes (post-implementation)
+
+- `--until` alone now always means "beginning..until": the config's `sync.since` default only applies when neither window flag is given (previously it silently overrode the explicit flag).
+- Removed the unused `SyncConfig.until` field — the spec's `config.toml` schema documents only `sync.since` (scope creep from the 04 skeleton).

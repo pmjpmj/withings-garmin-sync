@@ -96,11 +96,7 @@ fn run_auth(args: AuthArgs) -> Result<i32, AppError> {
     let client = http::HttpClient::new(http::BaseUrls::from_env()).with_verbose(args.verbose);
     if args.verbose {
         eprintln!("[verbose] config dir: {}", dir.display());
-        eprintln!("[verbose] HTTP base URLs:");
-        eprintln!("[verbose]   withings_api  = {}", client.base.withings_api);
-        eprintln!("[verbose]   garmin_sso    = {}", client.base.garmin_sso);
-        eprintln!("[verbose]   garmin_diauth = {}", client.base.garmin_diauth);
-        eprintln!("[verbose]   garmin_api    = {}", client.base.garmin_api);
+        client.log_base_urls();
     }
 
     let authorize_url = withings::authorize_url(&config.withings.client_id);
@@ -269,6 +265,21 @@ fn run_sync(args: SyncArgs) -> Result<i32, AppError> {
     // Fail fast on missing/invalid config or tokens (exit 3).
     let config = config::load_config(&dir)?;
     let mut tokens = config::load_tokens(&dir)?;
+    if tokens.withings.access_token.trim().is_empty()
+        || tokens.garmin.access_token.trim().is_empty()
+        || tokens
+            .garmin
+            .client_id
+            .as_deref()
+            .unwrap_or("")
+            .trim()
+            .is_empty()
+    {
+        return Err(AppError::config(format!(
+            "tokens at {} are incomplete; run `auth` first",
+            config::tokens_path(&dir).display()
+        )));
+    }
 
     let client = http::HttpClient::new(http::BaseUrls::from_env()).with_verbose(args.verbose);
     let dry_run = !args.apply;
@@ -276,11 +287,7 @@ fn run_sync(args: SyncArgs) -> Result<i32, AppError> {
 
     if args.verbose {
         eprintln!("[verbose] config dir: {}", dir.display());
-        eprintln!("[verbose] HTTP base URLs:");
-        eprintln!("[verbose]   withings_api  = {}", client.base.withings_api);
-        eprintln!("[verbose]   garmin_sso    = {}", client.base.garmin_sso);
-        eprintln!("[verbose]   garmin_diauth = {}", client.base.garmin_diauth);
-        eprintln!("[verbose]   garmin_api    = {}", client.base.garmin_api);
+        client.log_base_urls();
     }
 
     // Refresh an expired Withings access token before reads begin; a rejected
@@ -327,14 +334,20 @@ fn run_sync(args: SyncArgs) -> Result<i32, AppError> {
     };
     let since_flag = args.since.as_deref().map(timefmt::parse_date).transpose()?;
     let since = since_flag.or_else(|| {
-        config
-            .sync
-            .since
-            .as_deref()
-            .map(timefmt::parse_date)
-            .transpose()
-            .ok()
-            .flatten()
+        // An explicit `--until` bounds the window by itself; the config's
+        // `sync.since` default only applies when no window flag is given.
+        if until_flag.is_some() {
+            None
+        } else {
+            config
+                .sync
+                .since
+                .as_deref()
+                .map(timefmt::parse_date)
+                .transpose()
+                .ok()
+                .flatten()
+        }
     });
     let since = since.unwrap_or(default_since);
     if since > until {

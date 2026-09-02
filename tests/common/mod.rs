@@ -309,10 +309,6 @@ impl FakeServer {
                         if e.kind() == std::io::ErrorKind::ConnectionAborted
                             || e.kind() == std::io::ErrorKind::ConnectionReset
                             || e.kind() == std::io::ErrorKind::Interrupted => {}
-                    Err(ref e)
-                        if e.kind() == std::io::ErrorKind::ConnectionAborted
-                            || e.kind() == std::io::ErrorKind::ConnectionReset
-                            || e.kind() == std::io::ErrorKind::Interrupted => {}
                     Err(_) => break,
                 }
             }

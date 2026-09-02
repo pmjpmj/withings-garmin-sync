@@ -375,6 +375,89 @@ fn verbose_logs_each_request_and_response() {
     assert!(run.stderr.contains("<- HTTP 200"), "stderr: {}", run.stderr);
 }
 
+#[test]
+fn persistent_json_429_is_failure_not_success() {
+    // A 200 whose JSON body keeps saying 429 must never be counted as a
+    // successful blood-pressure write.
+    let dir = TempDir::new();
+    write_file(&dir.path().join("config.toml"), CONFIG);
+    write_tokens(&dir, "wa", now_epoch_plus(3600), "ga");
+    let withings = FakeServer::start(vec![Route::post("/measure", |_req, _i| {
+        FakeResponse::json(
+            200,
+            r#"{"status":0,"body":{"updatetime":1767342600,"timezone":"UTC","measuregrps":[
+                {"grpid":2,"attrib":2,"date":1767342601,"category":1,"measures":[{"value":120,"type":10,"unit":0},{"value":80,"type":9,"unit":0}]}
+            ],"more":0,"offset":0}}"#,
+        )
+    })]);
+    let garmin = FakeServer::start(vec![Route::post(
+        "/bloodpressure-service/bloodpressure",
+        |_req, _i| FakeResponse::json(200, r#"{"error":{"status-code":"429"}}"#),
+    )]);
+    let diauth = FakeServer::start(vec![]);
+
+    let run = run_sync(&dir, &["--apply"], &sync_env(&withings, &garmin, &diauth));
+
+    // Three attempts (backoff), then a counted failure: exit 1, not 0.
+    assert_eq!(run.code, 1, "stdout: {}", run.stdout);
+    assert_eq!(
+        garmin
+            .requests_for("POST", "/bloodpressure-service/bloodpressure")
+            .len(),
+        3
+    );
+    assert!(
+        run.stdout
+            .contains("blood-pressure: 0 written, 0 skipped, 1 failed"),
+        "stdout: {}",
+        run.stdout
+    );
+}
+
+#[test]
+fn empty_tokens_file_exits_3_with_run_auth_hint() {
+    let dir = TempDir::new();
+    write_file(&dir.path().join("config.toml"), CONFIG);
+    write_file(&dir.path().join("tokens.json"), "{}");
+    let withings = FakeServer::start(vec![]);
+    let garmin = FakeServer::start(vec![]);
+    let diauth = FakeServer::start(vec![]);
+
+    let run = run_sync(&dir, &[], &sync_env(&withings, &garmin, &diauth));
+
+    assert_eq!(run.code, 3, "stdout: {}", run.stdout);
+    assert!(
+        run.stderr.contains("run `auth` first"),
+        "stderr: {}",
+        run.stderr
+    );
+}
+
+#[test]
+fn until_alone_means_beginning_despite_config_since() {
+    let dir = TempDir::new();
+    write_file(
+        &dir.path().join("config.toml"),
+        "[withings]\nclient_id = \"test-client-id\"\nclient_secret = \"test-client-secret\"\n\n[sync]\nsince = \"2026-01-15\"\n",
+    );
+    write_tokens(&dir, "wa", now_epoch_plus(3600), "ga");
+    let withings = FakeServer::start(vec![Route::post("/measure", |_req, _i| empty_measures())]);
+    let garmin = FakeServer::start(vec![]);
+    let diauth = FakeServer::start(vec![]);
+
+    let run = run_sync(
+        &dir,
+        &["--until", "2026-02-01"],
+        &sync_env(&withings, &garmin, &diauth),
+    );
+
+    assert_eq!(run.code, 0, "stderr: {}", run.stderr);
+    let reads = withings.requests_for("POST", "/measure");
+    let fields = parse_form(&reads[0].body);
+    assert_eq!(form_value(&fields, "startdate"), "0");
+    assert_eq!(form_value(&fields, "enddate"), "1769904000");
+}
+
 fn now_epoch_plus(seconds: u64) -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
