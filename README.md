@@ -1,6 +1,6 @@
 # withings-garmin-sync
 
-A one-shot Rust CLI for Linux that copies **body weight** (Withings smart scale)
+A one-shot Rust CLI for Linux and macOS that copies **body weight** (Withings smart scale)
 and **blood pressure** (Withings BP monitor) from the Withings API into Garmin
 Connect, preserving each measurement's original timestamp.
 
@@ -37,7 +37,7 @@ Key properties:
 
 ## Prerequisites
 
-1. **Rust toolchain** (stable). Build and install with Cargo.
+1. **Rust toolchain** (stable) — only needed when building from source; see prebuilt binaries below.
 2. **A Withings developer app:**
    - Register an app in the [Withings developer portal](https://developer.withings.com/).
    - Note the **client id** and **client secret** (prompted for by `auth`).
@@ -52,6 +52,31 @@ Key properties:
    factor (email or TOTP) handy during `auth`.
 
 ## Installation
+
+### Prebuilt binaries
+
+Each [versioned release](https://github.com/pmjpmj/withings-garmin-sync/releases)
+(triggered by pushing a `vX.Y.Z` tag matching the `Cargo.toml` version) ships
+per-target tarballs plus a `SHA256SUMS`:
+
+- `withings-garmin-sync-<version>-linux-x86_64.tar.gz` — Linux, glibc,
+  dynamically linked against system OpenSSL 3 (`libssl.so.3`, present on
+  current distros).
+- `withings-garmin-sync-<version>-macos-arm64.tar.gz` — Apple Silicon,
+  unsigned. A browser download gets quarantined by Gatekeeper; clear it with
+  `xattr -d com.apple.quarantine <file>` (or use `curl`, which never
+  quarantines).
+
+Example:
+
+```sh
+curl -LO https://github.com/pmjpmj/withings-garmin-sync/releases/download/v0.2.0/withings-garmin-sync-v0.2.0-macos-arm64.tar.gz
+shasum -a 256 withings-garmin-sync-v0.2.0-macos-arm64.tar.gz   # verify against SHA256SUMS
+tar -xzf withings-garmin-sync-v0.2.0-macos-arm64.tar.gz
+./withings-garmin-sync --help
+```
+
+### Build from source
 
 ```sh
 cargo install --path .
@@ -166,6 +191,13 @@ The single test seam is the injectable HTTP base URLs above: integration
 tests point the compiled binary at in-process fake servers via a temp
 `--config-dir` and assert on requests received, stdout, exit code, and files
 written.
+
+### Releasing
+
+Push a tag `vX.Y.Z` that matches the `version` in `Cargo.toml` (bump it on
+`main` first). `.github/workflows/release.yml` runs the test suite, builds
+Linux (x86_64, glibc) and macOS (arm64) binaries natively, and attaches the
+tarballs plus `SHA256SUMS` to the GitHub Release. See ADR-0002.
 
 ## License
 
