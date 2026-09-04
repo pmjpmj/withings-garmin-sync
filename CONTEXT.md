@@ -29,4 +29,5 @@ blood-pressure measurements from Withings and writes them to Garmin Connect.
 ## Decisions
 
 - `docs/adr/` — ADR-0001: sync window resolution. ADR-0002: release
-  pipeline for Linux and macOS.
+  pipeline for Linux and macOS. ADR-0003: aarch64 Linux release asset for
+  Raspberry Pi 4.
