@@ -74,7 +74,7 @@ Credentials and settings live in plaintext under `~/.config/withings-garmin-sync
 - `sync` flags:
   - `--dry-run` (default): authenticate, read, transform, and print a would-write report; perform **no** writes.
   - `--apply`: perform the writes.
-  - `--since <date>`, `--until <date>`: bound the sync window (ISO `YYYY-MM-DD`). Default window when omitted is the last 30 days; `--since` without `--until` means "since … until now".
+  - `--since <date>`, `--until <date>`: bound the sync window (ISO `YYYY-MM-DD`). Default window when omitted is the last 24 hours (rolling); `--since` without `--until` means "since … until now".
   - `--config-dir <path>`: override the config directory (default `~/.config/withings-garmin-sync`).
   - `--verbose`: log each request/response.
 - `auth` may also accept `--config-dir`.
@@ -105,7 +105,7 @@ client_id = "…"          # from the Withings developer portal
 client_secret = "…"
 
 [sync]
-since = "2026-01-01"     # optional; omit for the default 30-day window
+since = "2026-01-01"     # optional; omit for the default 24-hour window
 ```
 
 ```jsonc

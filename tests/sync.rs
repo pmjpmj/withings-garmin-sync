@@ -134,8 +134,8 @@ fn dry_run_reads_window_and_reports_would_writes_without_writing() {
     let end: i64 = form_value(&fields, "enddate").parse().unwrap();
     let n = now();
     assert!(
-        (n - 30 * 86400 - start).abs() < 120,
-        "startdate {start} not ~30d ago"
+        (n - 86400 - start).abs() < 120,
+        "startdate {start} not ~1d ago"
     );
     assert!((n - end).abs() < 120, "enddate {end} not ~now");
     assert_eq!(

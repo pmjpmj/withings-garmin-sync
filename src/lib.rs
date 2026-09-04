@@ -18,6 +18,10 @@ pub const EXIT_USAGE: i32 = 2;
 pub const EXIT_CONFIG: i32 = 3;
 pub const EXIT_AUTH: i32 = 4;
 
+/// Built-in sync window when neither --since/--until nor `sync.since` are
+/// set: the rolling last 24 hours (ADR-0001).
+pub const DEFAULT_WINDOW_SECS: i64 = 86400;
+
 #[derive(Debug)]
 pub struct AppError {
     pub code: i32,
@@ -377,14 +381,14 @@ fn run_sync(args: SyncArgs) -> Result<i32, AppError> {
     }
 
     // Resolve the sync window: --since/--until flags win, then the config's
-    // sync.since default, then the built-in last-30-days window.
+    // sync.since default, then the built-in rolling 24-hour window.
     let now = timefmt::now_epoch();
     let until_flag = args.until.as_deref().map(timefmt::parse_date).transpose()?;
     let until = until_flag.unwrap_or(now);
     let default_since = if until_flag.is_some() {
         0 // `--until` alone means "from the beginning until ..."
     } else {
-        now - 30 * 86400
+        now - DEFAULT_WINDOW_SECS
     };
     let since_flag = args.since.as_deref().map(timefmt::parse_date).transpose()?;
     let since = since_flag.or_else(|| {
@@ -412,7 +416,7 @@ fn run_sync(args: SyncArgs) -> Result<i32, AppError> {
     }
 
     let window_label = if since_flag.is_none() && until_flag.is_none() {
-        "last 30 days".to_string()
+        "last 24 hours".to_string()
     } else {
         match (since_flag, until_flag) {
             (Some(_), Some(_)) => format!(
@@ -422,7 +426,7 @@ fn run_sync(args: SyncArgs) -> Result<i32, AppError> {
             ),
             (Some(_), None) => format!("{}..now", args.since.as_deref().unwrap()),
             (None, Some(_)) => format!("..{}", args.until.as_deref().unwrap()),
-            (None, None) => "last 30 days".to_string(),
+            (None, None) => "last 24 hours".to_string(),
         }
     };
 

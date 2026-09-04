@@ -96,7 +96,7 @@ client_secret = "your-client-secret"
 
 [sync]
 # Optional: default lower bound for the sync window when no --since/--until
-# flags are given (omit for the built-in last-30-days window).
+# flags are given (omit for the built-in rolling 24-hour window).
 since = "2026-01-01"
 ```
 
@@ -109,7 +109,7 @@ withings-garmin-sync sync
 # Actually write to Garmin Connect.
 withings-garmin-sync sync --apply
 
-# Bound the window (ISO YYYY-MM-DD). Defaults: last 30 days.
+# Bound the window (ISO YYYY-MM-DD). Defaults: last 24 hours.
 withings-garmin-sync sync --since 2026-01-01 --until 2026-06-01
 withings-garmin-sync sync --since 2026-01-01   # since ... until now
 withings-garmin-sync sync --until 2026-01-01   # from the beginning until ...
