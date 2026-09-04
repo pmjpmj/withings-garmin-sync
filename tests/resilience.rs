@@ -285,6 +285,12 @@ fn garmin_429_is_retried_whether_http_status_or_json_body() {
                 FakeResponse::json(200, "{}")
             }
         }),
+        Route::get_prefix("/bloodpressure-service/bloodpressure/range", |_req, _i| {
+            FakeResponse::json(
+                200,
+                r#"{"from":"2026-01-02","until":"2026-01-02","measurementSummaries":[]}"#,
+            )
+        }),
     ]);
     let diauth = FakeServer::start(vec![]);
 
@@ -390,10 +396,17 @@ fn persistent_json_429_is_failure_not_success() {
             ],"more":0,"offset":0}}"#,
         )
     })]);
-    let garmin = FakeServer::start(vec![Route::post(
-        "/bloodpressure-service/bloodpressure",
-        |_req, _i| FakeResponse::json(200, r#"{"error":{"status-code":"429"}}"#),
-    )]);
+    let garmin = FakeServer::start(vec![
+        Route::get_prefix("/bloodpressure-service/bloodpressure/range", |_req, _i| {
+            FakeResponse::json(
+                200,
+                r#"{"from":"2026-01-02","until":"2026-01-02","measurementSummaries":[]}"#,
+            )
+        }),
+        Route::post("/bloodpressure-service/bloodpressure", |_req, _i| {
+            FakeResponse::json(200, r#"{"error":{"status-code":"429"}}"#)
+        }),
+    ]);
     let diauth = FakeServer::start(vec![]);
 
     let run = run_sync(&dir, &["--apply"], &sync_env(&withings, &garmin, &diauth));

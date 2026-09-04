@@ -241,6 +241,7 @@ type RouteHandler = Box<dyn Fn(&RecordedRequest, usize) -> FakeResponse + Send +
 pub struct Route {
     method: &'static str,
     path: &'static str,
+    prefix: bool,
     handler: RouteHandler,
 }
 
@@ -253,6 +254,7 @@ impl Route {
         Route {
             method,
             path,
+            prefix: false,
             handler: Box::new(handler),
         }
     }
@@ -269,6 +271,20 @@ impl Route {
         handler: impl Fn(&RecordedRequest, usize) -> FakeResponse + Send + Sync + 'static,
     ) -> Self {
         Route::new("GET", path, handler)
+    }
+
+    /// A GET route that matches any path starting with `prefix` (used for
+    /// endpoints whose path embeds dynamic dates).
+    pub fn get_prefix(
+        prefix: &'static str,
+        handler: impl Fn(&RecordedRequest, usize) -> FakeResponse + Send + Sync + 'static,
+    ) -> Self {
+        Route {
+            method: "GET",
+            path: prefix,
+            prefix: true,
+            handler: Box::new(handler),
+        }
     }
 }
 
@@ -371,7 +387,12 @@ fn handle_connection(
     let response = routes
         .iter()
         .find(|route| {
-            route.method.eq_ignore_ascii_case(&request.method) && route.path == request.path
+            route.method.eq_ignore_ascii_case(&request.method)
+                && if route.prefix {
+                    request.path.starts_with(route.path)
+                } else {
+                    route.path == request.path
+                }
         })
         .map(|route| (route.handler)(&request, calls))
         .unwrap_or_else(|| FakeResponse::new(404, "not found"));

@@ -158,26 +158,56 @@ pub fn read_measures(
     ))
 }
 
+/// Generate a fresh random `state` for one authorization round-trip.
+/// Withings requires the parameter on the authorize URL; the CLI validates
+/// the value Withings echoes back when the operator pastes the redirect URL.
+pub fn generate_state() -> String {
+    let mut bytes = [0u8; 16];
+    getrandom::fill(&mut bytes).expect("the operating system refused to provide randomness");
+    let mut state = String::with_capacity(32);
+    for byte in bytes {
+        state.push_str(&format!("{byte:02x}"));
+    }
+    state
+}
+
 /// Build the Withings authorize URL for the operator to open in a browser.
-pub fn authorize_url(client_id: &str) -> String {
+/// Withings requires a `state` query parameter (their API marks it
+/// `required: true`); the caller generates it with [`generate_state`].
+pub fn authorize_url(client_id: &str, state: &str) -> String {
     format!(
-        "{}/oauth2_user/authorize2?response_type=code&client_id={}&scope={}&redirect_uri={}",
+        "{}/oauth2_user/authorize2?response_type=code&client_id={}&scope={}&redirect_uri={}&state={}",
         AUTHORIZE_HOST,
         crate::http::query_encode(client_id),
         crate::http::query_encode("user.metrics"),
         crate::http::query_encode(REDIRECT_URI),
+        crate::http::query_encode(state),
     )
 }
 
 /// Extract the OAuth `code` from whatever the operator pasted: either a full
-/// redirect URL (`...?code=XYZ&state=...`) or the bare code.
-pub fn extract_code(pasted: &str) -> Result<String, AppError> {
+/// redirect URL (`...?code=XYZ&state=...`) or the bare code. When the pasted
+/// string carries a `state`, it must match `state` (this run's generated
+/// value); a mismatch is rejected. A bare code has no state to compare and
+/// is accepted as-is.
+pub fn extract_code(pasted: &str, state: &str) -> Result<String, AppError> {
     let pasted = pasted.trim();
     if pasted.is_empty() {
         return Err(AppError::new(
             crate::EXIT_AUTH,
             "no authorization code provided; open the URL above, authorize, and paste the redirect",
         ));
+    }
+    if let Some(marker) = pasted.find("state=") {
+        let rest = &pasted[marker + "state=".len()..];
+        let end = rest.find(['&', '#']).unwrap_or(rest.len());
+        let echoed = rest[..end].trim();
+        if echoed != state {
+            return Err(AppError::new(
+                crate::EXIT_AUTH,
+                "the pasted redirect's state does not match this run; re-run `auth`",
+            ));
+        }
     }
     let Some(marker) = pasted.find("code=") else {
         // A pasted URL without a `code` parameter is an error; a bare code is
@@ -357,31 +387,56 @@ mod tests {
     use super::*;
 
     #[test]
-    fn authorize_url_encodes_client_id_scope_and_redirect() {
-        let url = authorize_url("cli&id");
+    fn authorize_url_encodes_client_id_scope_redirect_and_state() {
+        let url = authorize_url("cli&id", "state&more");
         assert!(url.starts_with("https://account.withings.com/oauth2_user/authorize2?"));
         assert!(url.contains("response_type=code"));
         assert!(url.contains("client_id=cli%26id"));
         assert!(url.contains("scope=user.metrics"));
         assert!(url.contains("redirect_uri=http%3A%2F%2Flocalhost%3A8765%2F"));
+        assert!(url.contains("state=state%26more"));
+    }
+
+    #[test]
+    fn generate_state_is_32_hex_characters() {
+        let state = generate_state();
+        assert_eq!(state.len(), 32);
+        assert!(state.chars().all(|c| c.is_ascii_hexdigit()), "{state}");
     }
 
     #[test]
     fn extract_code_handles_full_redirect_url() {
-        let code = extract_code("http://localhost:8765/?code=abc123&state=xyz").unwrap();
+        let code = extract_code("http://localhost:8765/?code=abc123&state=xyz", "xyz").unwrap();
+        assert_eq!(code, "abc123");
+        // state may precede code in the query string
+        let code = extract_code("http://localhost:8765/?state=xyz&code=abc123", "xyz").unwrap();
         assert_eq!(code, "abc123");
     }
 
     #[test]
+    fn extract_code_accepts_url_without_state() {
+        let code = extract_code("http://localhost:8765/?code=abc123", "irrelevant").unwrap();
+        assert_eq!(code, "abc123");
+    }
+
+    #[test]
+    fn extract_code_rejects_mismatched_state() {
+        let error =
+            extract_code("http://localhost:8765/?code=abc123&state=nope", "xyz").unwrap_err();
+        assert_eq!(error.code, crate::EXIT_AUTH);
+        assert!(error.message.contains("state"), "{}", error.message);
+    }
+
+    #[test]
     fn extract_code_handles_bare_code() {
-        assert_eq!(extract_code("abc123").unwrap(), "abc123");
-        assert_eq!(extract_code("  abc123\n").unwrap(), "abc123");
+        assert_eq!(extract_code("abc123", "irrelevant").unwrap(), "abc123");
+        assert_eq!(extract_code("  abc123\n", "irrelevant").unwrap(), "abc123");
     }
 
     #[test]
     fn extract_code_rejects_empty_and_codeless_url() {
-        assert!(extract_code("").is_err());
-        assert!(extract_code("http://localhost:8765/?state=xyz").is_err());
+        assert!(extract_code("", "xyz").is_err());
+        assert!(extract_code("http://localhost:8765/?state=xyz", "xyz").is_err());
     }
 
     #[test]

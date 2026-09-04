@@ -156,12 +156,23 @@ impl HttpClient {
             .send()
             .map_err(|error| HttpError::Transport(format!("{url}: {error}")))?;
         let status = response.status().as_u16();
+        let version = response.version();
+        let response_headers: Vec<String> = response
+            .headers()
+            .iter()
+            .map(|(name, value)| {
+                format!("{name}: {}", value.to_str().unwrap_or("<non-utf8 value>"))
+            })
+            .collect();
         let body = response
             .text()
             .map_err(|error| HttpError::Transport(format!("{url}: {error}")))?;
         if self.verbose {
             let preview: String = body.chars().take(300).collect();
-            eprintln!("[verbose] <- HTTP {status} {url}");
+            eprintln!("[verbose] <- HTTP {status} ({version:?}) {url}");
+            for header in &response_headers {
+                eprintln!("[verbose]    {header}");
+            }
             if !preview.trim().is_empty() {
                 eprintln!("[verbose]    body: {preview}");
             }

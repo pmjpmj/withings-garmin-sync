@@ -68,7 +68,8 @@ fn single_page_withings(groups: Vec<serde_json::Value>) -> FakeServer {
     })])
 }
 
-/// Garmin API fake that accepts weight (204) and BP (200) writes.
+/// Garmin API fake that accepts weight (204) and BP (200) writes, and answers
+/// the BP range read-back (ticket 12) with "no existing measurements".
 fn ok_garmin() -> FakeServer {
     FakeServer::start(vec![
         Route::post("/weight-service/user-weight", |_req, _i| {
@@ -76,6 +77,12 @@ fn ok_garmin() -> FakeServer {
         }),
         Route::post("/bloodpressure-service/bloodpressure", |_req, _i| {
             FakeResponse::json(200, "{}")
+        }),
+        Route::get_prefix("/bloodpressure-service/bloodpressure/range", |_req, _i| {
+            FakeResponse::json(
+                200,
+                r#"{"from":"2026-01-02","until":"2026-01-02","measurementSummaries":[]}"#,
+            )
         }),
     ])
 }
@@ -334,6 +341,415 @@ fn apply_writes_weight_and_bp_with_native_headers() {
 }
 
 #[test]
+fn apply_weight_write_sends_exact_header_set_without_extras() {
+    let dir = TempDir::new();
+    write_valid_config_and_tokens(dir.path());
+    let withings = single_page_withings(vec![weight_group(82400, -3, EPOCH)]);
+    let garmin = ok_garmin();
+
+    let run = run_sync(&dir, &["--apply"], &withings, &garmin);
+
+    assert_eq!(run.code, 0, "stderr: {}", run.stderr);
+    let weight_calls = garmin.requests_for("POST", "/weight-service/user-weight");
+    assert_eq!(weight_calls.len(), 1, "{:#?}", garmin.requests());
+
+    // The exact header set the write path sends (plus the HTTP-level headers
+    // reqwest/hyper add: host and content-length). Anything else here is an
+    // extra Garmin never saw in the spike's proven curl.
+    let mut names: Vec<String> = weight_calls[0]
+        .headers
+        .iter()
+        .map(|(name, _)| name.to_ascii_lowercase())
+        .collect();
+    names.sort();
+    // Deliberately no dedup: a duplicate header line (e.g. Content-Type sent
+    // twice) must fail this test — Garmin's edge rejects it with a 400.
+    assert_eq!(names.len(), weight_calls[0].headers.len());
+    let expected = [
+        "accept",
+        "authorization",
+        "content-length",
+        "content-type",
+        "host",
+        "user-agent",
+        "x-app-ver",
+        "x-garmin-client-platform",
+        "x-garmin-paired-app-version",
+        "x-garmin-user-agent",
+        "x-gcexperience",
+        "x-lang",
+    ];
+    assert_eq!(
+        names,
+        expected.to_vec(),
+        "unexpected header set: {:#?}",
+        weight_calls[0].headers
+    );
+
+    // The required values, exactly as the spike's working curl sent them.
+    assert_eq!(
+        weight_calls[0].header("user-agent").unwrap(),
+        "GCM-Android-5.23"
+    );
+    assert_eq!(weight_calls[0].header("x-app-ver").unwrap(), "10861");
+    assert_eq!(
+        weight_calls[0]
+            .header("x-garmin-paired-app-version")
+            .unwrap(),
+        "10861"
+    );
+    assert_eq!(
+        weight_calls[0].header("x-garmin-client-platform").unwrap(),
+        "Android"
+    );
+    assert_eq!(weight_calls[0].header("x-lang").unwrap(), "en");
+    assert_eq!(weight_calls[0].header("x-gcexperience").unwrap(), "GC5");
+    assert_eq!(
+        weight_calls[0].header("accept").unwrap(),
+        "application/json"
+    );
+    assert!(
+        weight_calls[0]
+            .header("content-type")
+            .unwrap()
+            .starts_with("application/json"),
+        "content-type: {:?}",
+        weight_calls[0].header("content-type")
+    );
+}
+
+#[test]
+fn apply_writes_send_exact_headers_and_bodies_for_both_endpoints() {
+    let dir = TempDir::new();
+    write_valid_config_and_tokens(dir.path());
+    let withings = single_page_withings(vec![
+        weight_group(82400, -3, EPOCH),
+        bp_group(120, 80, Some(72), EPOCH + 1),
+    ]);
+    let garmin = ok_garmin();
+
+    let run = run_sync(&dir, &["--apply"], &withings, &garmin);
+
+    assert_eq!(run.code, 0, "stderr: {}", run.stderr);
+
+    // The full wire request each write must produce: the native header set
+    // with exact values, no extras, and the exact JSON body. This is the
+    // shape the spike's curl proved live (ticket 01) and the ticket-11
+    // investigation found Garmin's edge to be strict about.
+    let expected_header_names = [
+        "accept",
+        "authorization",
+        "content-length",
+        "content-type",
+        "host",
+        "user-agent",
+        "x-app-ver",
+        "x-garmin-client-platform",
+        "x-garmin-paired-app-version",
+        "x-garmin-user-agent",
+        "x-gcexperience",
+        "x-lang",
+    ];
+    let expected_values: [(&str, &str); 9] = [
+        ("authorization", "Bearer ga"),
+        ("user-agent", "GCM-Android-5.23"),
+        (
+            "x-garmin-user-agent",
+            "com.garmin.android.apps.connectmobile/5.23; ; Google/sdk_gphone64_arm64/google; Android/33; Dalvik/2.1.0",
+        ),
+        ("x-garmin-paired-app-version", "10861"),
+        ("x-garmin-client-platform", "Android"),
+        ("x-app-ver", "10861"),
+        ("x-lang", "en"),
+        ("x-gcexperience", "GC5"),
+        ("accept", "application/json"),
+    ];
+
+    let cases: [(&str, &str, serde_json::Value); 2] = [
+        (
+            "/weight-service/user-weight",
+            "weight",
+            json!({
+                "dateTimestamp": "2026-01-02T08:30:00.000",
+                "gmtTimestamp": "2026-01-02T08:30:00.000",
+                "unitKey": "kg",
+                "sourceType": "MANUAL",
+                "value": 82.4
+            }),
+        ),
+        (
+            "/bloodpressure-service/bloodpressure",
+            "blood-pressure",
+            json!({
+                "measurementTimestampLocal": "2026-01-02T08:30:01.000",
+                "measurementTimestampGMT": "2026-01-02T08:30:01.000",
+                "systolic": 120,
+                "diastolic": 80,
+                "pulse": 72,
+                "sourceType": "MANUAL"
+            }),
+        ),
+    ];
+
+    for (path, label, expected_body) in cases {
+        let calls = garmin.requests_for("POST", path);
+        assert_eq!(calls.len(), 1, "{label}: {:#?}", garmin.requests());
+        let request = &calls[0];
+
+        let mut names: Vec<String> = request
+            .headers
+            .iter()
+            .map(|(name, _)| name.to_ascii_lowercase())
+            .collect();
+        names.sort();
+        // Deliberately no dedup: duplicate header lines must fail the test.
+        assert_eq!(names.len(), request.headers.len(), "{label}: duplicates");
+        assert_eq!(
+            names,
+            expected_header_names.to_vec(),
+            "{label}: unexpected header set: {:#?}",
+            request.headers
+        );
+
+        for (name, value) in expected_values {
+            assert_eq!(request.header(name), Some(value), "{label}: header {name}");
+        }
+        assert!(
+            request
+                .header("content-type")
+                .unwrap()
+                .starts_with("application/json"),
+            "{label}: content-type: {:?}",
+            request.header("content-type")
+        );
+        assert_eq!(
+            request.header("host").unwrap(),
+            garmin.base_url.trim_start_matches("http://"),
+            "{label}: host"
+        );
+        assert_eq!(
+            request.header("content-length").unwrap(),
+            request.body.len().to_string(),
+            "{label}: content-length must match the body bytes"
+        );
+
+        let body: serde_json::Value = serde_json::from_str(&request.body).unwrap();
+        assert_eq!(body, expected_body, "{label}: request body");
+    }
+}
+
+/// Capture the *actual bytes* the binary puts on a real TCP socket for the
+/// weight write — nothing parsed, nothing reconstructed — and check the wire
+/// request against the proven spike curl byte-for-byte. This guards against
+/// transport-level drift (extra headers, casing, framing) that parsed-view
+/// tests could hide.
+#[test]
+fn apply_weight_write_raw_wire_bytes_match_proven_request() {
+    use std::io::{Read, Write};
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let raw_addr = listener.local_addr().unwrap();
+
+    let dir = TempDir::new();
+    write_valid_config_and_tokens(dir.path());
+    let withings = single_page_withings(vec![weight_group(82400, -3, EPOCH)]);
+
+    let server = std::thread::spawn(move || {
+        listener.set_nonblocking(true).unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+        let (mut stream, _peer) = loop {
+            match listener.accept() {
+                Ok(pair) => break pair,
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "the binary never connected to the wire-capture socket"
+                    );
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                Err(e) => panic!("accept failed: {e}"),
+            }
+        };
+        stream
+            .set_read_timeout(Some(std::time::Duration::from_secs(10)))
+            .unwrap();
+
+        let mut bytes: Vec<u8> = Vec::new();
+        let mut buf = [0u8; 8192];
+        let header_end = loop {
+            if let Some(pos) = find_bytes(&bytes, b"\r\n\r\n") {
+                break pos;
+            }
+            let n = stream.read(&mut buf).unwrap();
+            assert!(n > 0, "connection closed before the headers arrived");
+            bytes.extend_from_slice(&buf[..n]);
+        };
+        let head = String::from_utf8(bytes[..header_end].to_vec()).unwrap();
+        let content_length: usize = head
+            .split("\r\n")
+            .find_map(|line| {
+                line.split_once(':').and_then(|(name, value)| {
+                    name.eq_ignore_ascii_case("content-length")
+                        .then(|| value.trim().parse::<usize>().unwrap())
+                })
+            })
+            .expect("no content-length header");
+        while bytes.len() < header_end + 4 + content_length {
+            let n = stream.read(&mut buf).unwrap();
+            assert!(n > 0, "connection closed before the body arrived");
+            bytes.extend_from_slice(&buf[..n]);
+        }
+        stream
+            .write_all(b"HTTP/1.1 204 No Content\r\ncontent-length: 0\r\n\r\n")
+            .unwrap();
+        bytes
+    });
+
+    let raw_base = format!("http://{raw_addr}");
+    let env: Vec<(&str, &str)> = vec![
+        ("WGS_WITHINGS_API_BASE", withings.base_url.as_str()),
+        ("WGS_GARMIN_API_BASE", raw_base.as_str()),
+        ("TZ", "UTC"),
+    ];
+    let full: Vec<&str> = vec![
+        "sync",
+        "--config-dir",
+        dir.path().to_str().unwrap(),
+        "--apply",
+    ];
+    let run = run_bin(&full, &env);
+    let bytes = server.join().unwrap();
+
+    assert_eq!(
+        run.code, 0,
+        "stdout: {}\nstderr: {}",
+        run.stdout, run.stderr
+    );
+    let text = String::from_utf8(bytes).unwrap();
+
+    // Request line, verbatim.
+    assert_eq!(
+        text.split("\r\n").next().unwrap(),
+        "POST /weight-service/user-weight HTTP/1.1",
+        "wire request line: {text:?}"
+    );
+
+    // Every header line on the wire, verbatim: the exact set, nothing extra.
+    let header_lines: Vec<&str> = text
+        .split("\r\n")
+        .skip(1)
+        .take_while(|line| !line.is_empty())
+        .collect();
+    let mut names: Vec<String> = header_lines
+        .iter()
+        .map(|line| line.split(':').next().unwrap().trim().to_ascii_lowercase())
+        .collect();
+    names.sort();
+    let expected_names = [
+        "accept",
+        "authorization",
+        "content-length",
+        "content-type",
+        "host",
+        "user-agent",
+        "x-app-ver",
+        "x-garmin-client-platform",
+        "x-garmin-paired-app-version",
+        "x-garmin-user-agent",
+        "x-gcexperience",
+        "x-lang",
+    ];
+    assert_eq!(
+        names,
+        expected_names.to_vec(),
+        "wire header lines: {header_lines:?}"
+    );
+
+    let expected_values: [(&str, &str); 10] = [
+        ("authorization", "Bearer ga"),
+        ("user-agent", "GCM-Android-5.23"),
+        (
+            "x-garmin-user-agent",
+            "com.garmin.android.apps.connectmobile/5.23; ; Google/sdk_gphone64_arm64/google; Android/33; Dalvik/2.1.0",
+        ),
+        ("x-garmin-paired-app-version", "10861"),
+        ("x-garmin-client-platform", "Android"),
+        ("x-app-ver", "10861"),
+        ("x-lang", "en"),
+        ("x-gcexperience", "GC5"),
+        ("accept", "application/json"),
+        ("content-type", "application/json"),
+    ];
+    for (name, value) in expected_values {
+        let line = header_lines
+            .iter()
+            .find(|line| {
+                line.split_once(':')
+                    .unwrap()
+                    .0
+                    .trim()
+                    .eq_ignore_ascii_case(name)
+            })
+            .unwrap_or_else(|| panic!("missing wire header {name}: {header_lines:?}"));
+        assert_eq!(
+            line.split_once(':').unwrap().1.trim(),
+            value,
+            "wire header {name}"
+        );
+    }
+    assert_eq!(
+        header_lines
+            .iter()
+            .find(|l| l
+                .split_once(':')
+                .unwrap()
+                .0
+                .trim()
+                .eq_ignore_ascii_case("host"))
+            .unwrap()
+            .split_once(':')
+            .unwrap()
+            .1
+            .trim(),
+        raw_addr.to_string(),
+        "wire host header"
+    );
+
+    // The body bytes, verbatim.
+    let expected_body = json!({
+        "dateTimestamp": "2026-01-02T08:30:00.000",
+        "gmtTimestamp": "2026-01-02T08:30:00.000",
+        "unitKey": "kg",
+        "sourceType": "MANUAL",
+        "value": 82.4
+    })
+    .to_string();
+    let body = text.split("\r\n\r\n").nth(1).unwrap();
+    assert_eq!(body, expected_body, "wire body bytes");
+    assert_eq!(
+        header_lines
+            .iter()
+            .find(|l| l
+                .split_once(':')
+                .unwrap()
+                .0
+                .trim()
+                .eq_ignore_ascii_case("content-length"))
+            .unwrap()
+            .split_once(':')
+            .unwrap()
+            .1
+            .trim(),
+        expected_body.len().to_string(),
+        "wire content-length"
+    );
+}
+
+fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    haystack.windows(needle.len()).position(|w| w == needle)
+}
+
+#[test]
 fn apply_pulse_omitted_when_withings_has_none() {
     let dir = TempDir::new();
     write_valid_config_and_tokens(dir.path());
@@ -397,6 +813,12 @@ fn apply_metrics_are_independent_weight_failure_does_not_block_bp() {
         Route::post("/bloodpressure-service/bloodpressure", |_req, _i| {
             FakeResponse::json(200, "{}")
         }),
+        Route::get_prefix("/bloodpressure-service/bloodpressure/range", |_req, _i| {
+            FakeResponse::json(
+                200,
+                r#"{"from":"2026-01-02","until":"2026-01-02","measurementSummaries":[]}"#,
+            )
+        }),
     ]);
 
     let run = run_sync(&dir, &["--apply"], &withings, &garmin);
@@ -429,14 +851,40 @@ fn apply_metrics_are_independent_weight_failure_does_not_block_bp() {
 }
 
 #[test]
-fn apply_rerun_sends_identical_writes_full_overwrite() {
+fn apply_rerun_skips_bp_days_already_on_garmin_but_rewrites_weight() {
     let dir = TempDir::new();
     write_valid_config_and_tokens(dir.path());
     let withings = single_page_withings(vec![
         weight_group(82400, -3, EPOCH),
         bp_group(120, 80, Some(72), EPOCH + 1),
     ]);
-    let garmin = ok_garmin();
+    // The BP read-back is stateful: the first read sees no existing
+    // measurements, the second sees the day already populated (as a live
+    // Garmin account would after the first write).
+    let garmin = FakeServer::start(vec![
+        Route::post("/weight-service/user-weight", |_req, _i| {
+            FakeResponse::new(204, "")
+        }),
+        Route::post("/bloodpressure-service/bloodpressure", |_req, _i| {
+            FakeResponse::json(200, "{}")
+        }),
+        Route::get_prefix(
+            "/bloodpressure-service/bloodpressure/range",
+            |_req, call| {
+                if call == 0 {
+                    FakeResponse::json(
+                        200,
+                        r#"{"from":"2026-01-02","until":"2026-01-02","measurementSummaries":[]}"#,
+                    )
+                } else {
+                    FakeResponse::json(
+                        200,
+                        r#"{"from":"2026-01-02","until":"2026-01-02","measurementSummaries":[{"startDate":"2026-01-02","endDate":"2026-01-02","highSystolic":120,"highDiastolic":80,"lowSystolic":120,"lowDiastolic":80,"numOfMeasurements":1,"category":"STAGE_1_HIGH","categoryName":"NORMAL","measurements":[]}]}"#,
+                    )
+                }
+            },
+        ),
+    ]);
 
     let first = run_sync(&dir, &["--apply"], &withings, &garmin);
     let second = run_sync(&dir, &["--apply"], &withings, &garmin);
@@ -444,13 +892,22 @@ fn apply_rerun_sends_identical_writes_full_overwrite() {
     assert_eq!(first.code, 0, "stderr: {}", first.stderr);
     assert_eq!(second.code, 0, "stderr: {}", second.stderr);
 
+    // Weight still writes every run (its endpoint dedups by timestamp); the
+    // BP write happens once — the second run's read-back sees the day and
+    // skips the re-write.
     let weight_calls = garmin.requests_for("POST", "/weight-service/user-weight");
     let bp_calls = garmin.requests_for("POST", "/bloodpressure-service/bloodpressure");
     assert_eq!(weight_calls.len(), 2, "{:#?}", garmin.requests());
-    assert_eq!(bp_calls.len(), 2);
-    // Identical payloads both runs: Garmin's timestamp dedup makes this safe.
+    assert_eq!(bp_calls.len(), 1, "{:#?}", garmin.requests());
     assert_eq!(weight_calls[0].body, weight_calls[1].body);
-    assert_eq!(bp_calls[0].body, bp_calls[1].body);
+    // The second run reports the BP reading as skipped, not written.
+    assert!(
+        second
+            .stdout
+            .contains("blood-pressure: 0 written, 1 skipped, 0 failed"),
+        "stdout: {}",
+        second.stdout
+    );
 }
 
 #[test]

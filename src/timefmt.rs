@@ -7,7 +7,9 @@ use chrono::{NaiveDate, Utc};
 use crate::AppError;
 
 /// Format epoch seconds as `YYYY-MM-DDTHH:MM:SS.SSS` in the system's local
-/// timezone.
+/// timezone. Garmin's write endpoints require fractional seconds on the
+/// timestamps: a no-fraction payload returned HTTP 500 (ticket 11), while
+/// `.SSS` values are accepted.
 pub fn local_ms(epoch: i64) -> String {
     match chrono::DateTime::from_timestamp(epoch, 0) {
         Some(dt) => dt
@@ -18,12 +20,27 @@ pub fn local_ms(epoch: i64) -> String {
     }
 }
 
-/// Format epoch seconds as `YYYY-MM-DDTHH:MM:SS.SSS` in UTC.
+/// Format epoch seconds as `YYYY-MM-DD` in UTC. See
+/// [`local_ms`] for why the fractional seconds are required.
 pub fn gmt_ms(epoch: i64) -> String {
     match chrono::DateTime::from_timestamp(epoch, 0) {
         Some(dt) => dt
             .with_timezone(&chrono::Utc)
             .format("%Y-%m-%dT%H:%M:%S%.3f")
+            .to_string(),
+        None => String::new(),
+    }
+}
+
+/// Format epoch seconds as `YYYY-MM-DD` in the system's local timezone, to
+/// match Garmin's day bucketing in the blood-pressure range read-back
+/// (ticket 12). The date is the calendar day in the same timezone the write
+/// path already uses for `measurementTimestampLocal`.
+pub fn local_date(epoch: i64) -> String {
+    match chrono::DateTime::from_timestamp(epoch, 0) {
+        Some(dt) => dt
+            .with_timezone(&chrono::Local)
+            .format("%Y-%m-%d")
             .to_string(),
         None => String::new(),
     }
@@ -59,6 +76,19 @@ mod tests {
     #[test]
     fn gmt_ms_formats_millisecond_precision_utc() {
         assert_eq!(gmt_ms(EPOCH), "2026-01-02T08:30:00.000");
+    }
+
+    #[test]
+    fn local_date_matches_the_date_prefix_of_local_ms() {
+        // `local_date` and `local_ms` share the local timezone, so the date
+        // must be the `YYYY-MM-DD` prefix of the full timestamp string.
+        let ms = local_ms(EPOCH);
+        let date = local_date(EPOCH);
+        assert!(
+            ms.starts_with(&date),
+            "local_ms {ms} should start with local_date {date}"
+        );
+        assert_eq!(date.len(), 10, "YYYY-MM-DD is 10 chars");
     }
 
     #[test]

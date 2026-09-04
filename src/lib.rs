@@ -99,7 +99,8 @@ fn run_auth(args: AuthArgs) -> Result<i32, AppError> {
         client.log_base_urls();
     }
 
-    let authorize_url = withings::authorize_url(&config.withings.client_id);
+    let state = withings::generate_state();
+    let authorize_url = withings::authorize_url(&config.withings.client_id, &state);
     println!("Open this URL in a browser and authorize the app:");
     println!("{authorize_url}");
     println!(
@@ -110,7 +111,7 @@ fn run_auth(args: AuthArgs) -> Result<i32, AppError> {
 
     let pasted =
         prompt_line("Paste the redirect URL (or the bare code) your browser was sent to: ")?;
-    let code = withings::extract_code(&pasted)?;
+    let code = withings::extract_code(&pasted, &state)?;
 
     let withings_tokens = withings::exchange_code(
         &client,
@@ -227,6 +228,59 @@ where
             // The single retry with the fresh token.
             match write(client, &state.access_token, payload) {
                 Ok(()) => Ok(()),
+                Err(failure) => Err(AppError::new(
+                    EXIT_METRIC_FAILURE,
+                    failure.message().to_string(),
+                )),
+            }
+        }
+        Err(failure) => Err(AppError::new(
+            EXIT_METRIC_FAILURE,
+            failure.message().to_string(),
+        )),
+    }
+}
+
+/// Read one Garmin record. A `401` triggers a DI token refresh (persisted)
+/// followed by a single retry; a rejected refresh is returned as an auth
+/// error (`EXIT_AUTH`) so the run aborts with "re-run `auth`".
+fn garmin_read<F, T>(
+    client: &http::HttpClient,
+    state: &mut GarminTokenState,
+    tokens_path: &std::path::Path,
+    tokens: &mut config::Tokens,
+    read: F,
+) -> Result<T, AppError>
+where
+    F: Fn(&http::HttpClient, &str) -> Result<T, garmin::WriteFailure>,
+{
+    match read(client, &state.access_token) {
+        Ok(value) => Ok(value),
+        Err(garmin::WriteFailure::Unauthorized) => {
+            let refreshed = garmin::refresh(client, &state.client_id, &state.refresh_token)
+                .map_err(|error| {
+                    AppError::new(
+                        EXIT_AUTH,
+                        format!(
+                            "Garmin token refresh failed: {}; re-run `auth`",
+                            error.message
+                        ),
+                    )
+                })?;
+            state.access_token = refreshed.access_token;
+            if let Some(rotate) = refreshed.refresh_token {
+                state.refresh_token = rotate;
+            }
+            tokens.garmin = config::GarminTokens {
+                access_token: state.access_token.clone(),
+                refresh_token: state.refresh_token.clone(),
+                client_id: Some(state.client_id.clone()),
+            };
+            config::write_tokens(tokens_path, tokens)?;
+
+            // The single retry with the fresh token.
+            match read(client, &state.access_token) {
+                Ok(value) => Ok(value),
                 Err(failure) => Err(AppError::new(
                     EXIT_METRIC_FAILURE,
                     failure.message().to_string(),
@@ -436,8 +490,38 @@ fn run_sync(args: SyncArgs) -> Result<i32, AppError> {
         client_id: tokens.garmin.client_id.clone().unwrap_or_default(),
     };
 
+    // Ticket 12: Garmin does not dedup blood-pressure writes by timestamp,
+    // so before writing BP, read back the days Garmin already has and skip
+    // any Withings reading on those days. Weight needs no read-back (its
+    // endpoint dedups). A failed read-back fails the BP metric closed rather
+    // than risk duplicates.
+    let mut bp_existing_days: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut bp_readback_failed = false;
+    if !bps.is_empty() {
+        let start_date = timefmt::local_date(since);
+        let end_date = timefmt::local_date(until);
+        match garmin_read(
+            &client,
+            &mut garmin_state,
+            &tokens_path,
+            &mut tokens,
+            |c, t| garmin::read_bp_dates(c, t, &start_date, &end_date),
+        ) {
+            Ok(dates) => bp_existing_days = dates.into_iter().collect(),
+            Err(error) if error.code == EXIT_AUTH => return Err(error),
+            Err(error) => {
+                eprintln!(
+                    "error: blood-pressure read-back failed: {}; skipping all blood-pressure writes this run",
+                    error.message
+                );
+                bp_readback_failed = true;
+            }
+        }
+    }
+
     let mut weight_failed = 0usize;
     let mut bp_failed = 0usize;
+    let mut bp_dedup_skipped = 0usize;
     for weight in &weights {
         let payload = garmin::weight_payload(
             &timefmt::local_ms(weight.epoch),
@@ -461,6 +545,23 @@ fn run_sync(args: SyncArgs) -> Result<i32, AppError> {
         }
     }
     for bp in &bps {
+        if bp_readback_failed {
+            bp_failed += 1;
+            continue;
+        }
+        // Skip re-writes of days Garmin already has (ticket 12): the BP
+        // endpoint does not dedup by timestamp, so identical re-writes would
+        // duplicate. Day granularity is the finest the read-back exposes.
+        let day = timefmt::local_date(bp.epoch);
+        if bp_existing_days.contains(&day) {
+            eprintln!(
+                "warning: skipping blood-pressure reading at {}: {} already on Garmin",
+                timefmt::local_ms(bp.epoch),
+                day
+            );
+            bp_dedup_skipped += 1;
+            continue;
+        }
         let payload = garmin::bp_payload(
             &timefmt::local_ms(bp.epoch),
             &timefmt::gmt_ms(bp.epoch),
@@ -486,12 +587,16 @@ fn run_sync(args: SyncArgs) -> Result<i32, AppError> {
     }
 
     let weight_written = weights.len().saturating_sub(weight_failed);
-    let bp_written = bps.len().saturating_sub(bp_failed);
+    let bp_written = bps
+        .len()
+        .saturating_sub(bp_failed)
+        .saturating_sub(bp_dedup_skipped);
     println!(
         "apply ({window_label}): weight: {weight_written} written, {weight_skips} skipped, {weight_failed} failed"
     );
     println!(
-        "apply ({window_label}): blood-pressure: {bp_written} written, {bp_skips} skipped, {bp_failed} failed"
+        "apply ({window_label}): blood-pressure: {bp_written} written, {} skipped, {bp_failed} failed",
+        bp_skips + bp_dedup_skipped
     );
 
     if weight_failed > 0 || bp_failed > 0 {

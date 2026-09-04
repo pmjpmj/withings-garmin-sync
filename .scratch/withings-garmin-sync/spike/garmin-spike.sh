@@ -376,7 +376,8 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     -c) MFA_CODE="$2"; shift 2 ;;
     -m) METHOD="$2"; shift 2 ;;
-    auth|mfa|write|readback) CMD="$1"; shift ;;
+    readback) CMD="$1"; shift; READBACK_DATE="${1:-}"; [[ -n "$READBACK_DATE" ]] && shift ;;
+    auth|mfa|write) CMD="$1"; shift ;;
     *) echo "unknown arg: $1" >&2; exit 2 ;;
   esac
 done
@@ -422,7 +423,7 @@ case "$CMD" in
     do_write
     ;;
   readback)
-    do_readback "${2:-}"
+    do_readback "${READBACK_DATE:-}"
     ;;
   *)
     echo "usage: $0 {auth|mfa|write|readback} [-c CODE] [-m METHOD]" >&2; exit 2

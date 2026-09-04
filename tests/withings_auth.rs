@@ -120,6 +120,7 @@ fn auth_prints_authorize_url_with_client_id_and_scope() {
         "stdout: {}",
         run.stdout
     );
+    assert!(run.stdout.contains("state="), "stdout: {}", run.stdout);
 }
 
 #[test]
@@ -132,7 +133,7 @@ fn auth_exchanges_pasted_code_and_persists_tokens() {
     let run = run_bin_stdin(
         &["auth", "--config-dir", dir.path().to_str().unwrap()],
         &auth_env(&withings, &sso, &diauth),
-        Some(&auth_stdin("http://localhost:8765/?code=abc123&state=xyz")),
+        Some(&auth_stdin("http://localhost:8765/?code=abc123")),
     );
 
     assert_eq!(run.code, 0, "stderr: {}", run.stderr);
@@ -160,6 +161,27 @@ fn auth_exchanges_pasted_code_and_persists_tokens() {
     assert_eq!(tokens["withings"]["access_token"], "wa-access");
     assert_eq!(tokens["withings"]["refresh_token"], "wa-refresh");
     assert!(tokens["withings"]["expires_at"].is_u64());
+}
+
+#[test]
+fn auth_rejects_a_mismatched_state_without_writing_tokens() {
+    let dir = TempDir::new();
+    write_config(&dir);
+    let withings = withings_token_server(SUCCESS_TOKENS);
+    let (sso, diauth) = garmin_servers();
+
+    let run = run_bin_stdin(
+        &["auth", "--config-dir", dir.path().to_str().unwrap()],
+        &auth_env(&withings, &sso, &diauth),
+        Some(&auth_stdin(
+            "http://localhost:8765/?code=abc123&state=not-mine",
+        )),
+    );
+
+    assert_eq!(run.code, 4, "stdout: {}", run.stdout);
+    assert!(run.stderr.contains("state"), "stderr: {}", run.stderr);
+    assert!(!dir.path().join("tokens.json").exists());
+    assert_eq!(withings.requests_for("POST", "/v2/oauth2").len(), 0);
 }
 
 #[test]

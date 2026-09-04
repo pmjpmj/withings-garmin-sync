@@ -52,7 +52,7 @@ Credentials and settings live in plaintext under `~/.config/withings-garmin-sync
 36. As a user, I want the CLI to fail fast with a clear "run `auth` first" message when config/tokens are missing, so that I know the required setup step.
 37. As a user, I want a final report of measurements written vs. skipped vs. failed, so that I can verify the outcome at a glance.
 38. As a user, I want the sync to be non-interactive (after first-run auth), so that I can call it from cron, launchd, or scripts.
-39. As a user, I want `--apply` to be safe to re-run, relying on Garmin's timestamp deduplication, so that overlapping windows never double-count.
+39. As a user, I want `--apply` to be safe to re-run, so that overlapping windows never double-count (weight via Garmin's timestamp deduplication, blood-pressure via a read-back-and-skip guard).
 40. As a user, I want the Garmin DI client id to be selected automatically (trying candidates in order and remembering the winner), so that I never have to know Garmin's internal client ids.
 41. As a user, I want the Withings OAuth scope limited to `user.metrics`, so that the CLI requests only the permission it actually needs.
 42. As a user, I want a native Rust binary installed via `cargo install`, so that there is no Python/Node runtime to manage.
@@ -206,7 +206,7 @@ No `JWT_FGP` cookie, no `DI-Backend`, no `NK: NT` — those belong to a legacy f
 - Read the window from Withings once, transform into two independent lists (weight, blood-pressure).
 - Dry-run: print a would-write line per measurement; write nothing.
 - Apply: write each list independently; a metric's failure does not abort the other. On completion, print counts of written / skipped / failed per metric and set the exit code per the table above.
-- Idempotency: the CLI performs a full overwrite of the window on every `--apply` run, relying on Garmin's timestamp deduplication (verified in the spike: two identical writes → one entry). No cursor/watermark is stored.
+- Idempotency: the CLI performs a full overwrite of the window on every `--apply` run. Weight re-writes are safe because Garmin deduplicates them by timestamp (verified in the spike: two identical writes → one entry). Blood-pressure re-writes are **not** deduplicated by Garmin, so the CLI first reads back the days Garmin already has and skips any BP reading on those days (day granularity — the range read-back exposes per-day summaries, not per-measurement timestamps). No cursor/watermark is stored.
 
 ### Error handling
 

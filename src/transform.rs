@@ -131,6 +131,9 @@ fn pair_blood_pressure(measures: &[RawMeasure]) -> Option<Result<BpReading, Stri
     }))
 }
 
+/// Round to three decimals, guarding against float representation artifacts
+/// (`82.456` stays `82.456`). Live verification (ticket 11) confirmed Garmin
+/// accepts multi-decimal kg values, so Withings' fidelity is kept.
 fn round3(value: f64) -> f64 {
     (value * 1000.0).round() / 1000.0
 }
