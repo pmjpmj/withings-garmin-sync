@@ -60,12 +60,11 @@ Each [versioned release](https://github.com/pmjpmj/withings-garmin-sync/releases
 per-target tarballs plus a `SHA256SUMS`:
 
 - `withings-garmin-sync-<version>-linux-x86_64.tar.gz` — Linux, glibc,
-  dynamically linked against system OpenSSL 3 (`libssl.so.3`, present on
-  current distros).
+  dynamically linked (no system crypto needed: TLS is rustls).
 - `withings-garmin-sync-<version>-linux-arm64.tar.gz` — Linux ARM64
-  (e.g. Raspberry Pi 4 on 64-bit Raspberry Pi OS), glibc, dynamically linked
-  against system OpenSSL 3 (`libssl.so.3`, present on Raspberry Pi OS
-  bookworm+).
+  (e.g. Raspberry Pi 4 on 64-bit Raspberry Pi OS), **fully static musl
+  build** — no glibc or OpenSSL requirement; runs on Bullseye, Bookworm,
+  and newer.
 - `withings-garmin-sync-<version>-macos-arm64.tar.gz` — Apple Silicon,
   unsigned. A browser download gets quarantined by Gatekeeper; clear it with
   `xattr -d com.apple.quarantine <file>` (or use `curl`, which never
@@ -200,9 +199,10 @@ written.
 
 Push a tag `vX.Y.Z` that matches the `version` in `Cargo.toml` (bump it on
 `main` first). `.github/workflows/release.yml` runs the test suite, builds
-Linux (x86_64 and arm64, glibc) and macOS (arm64) binaries natively, and
-attaches the tarballs plus `SHA256SUMS` to the GitHub Release. See ADR-0002
-and ADR-0003.
+Linux (x86_64 glibc, arm64 static musl) and macOS (arm64) binaries
+natively, and
+attaches the tarballs plus `SHA256SUMS` to the GitHub Release. See ADR-0002,
+ADR-0003, and ADR-0004.
 
 ## License
 
