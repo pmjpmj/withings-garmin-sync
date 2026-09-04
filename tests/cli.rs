@@ -41,7 +41,7 @@ fn version_prints_name_and_version() {
     let run = run_bin(&["--version"], &[]);
     assert_eq!(run.code, 0, "stderr: {}", run.stderr);
     assert!(run.stdout.contains("withings-garmin-sync"));
-    assert!(run.stdout.contains("0.1.0"));
+    assert!(run.stdout.contains(env!("CARGO_PKG_VERSION")));
 }
 
 #[test]
