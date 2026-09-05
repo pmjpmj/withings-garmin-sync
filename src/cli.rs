@@ -33,7 +33,47 @@ pub struct AuthArgs {
 }
 
 #[derive(Args)]
+#[command(args_conflicts_with_subcommands = true)]
 pub struct SyncArgs {
+    /// Metric to sync; bare `sync` is the same as `sync all`
+    #[command(subcommand)]
+    pub metric: Option<SyncMetric>,
+
+    #[command(flatten)]
+    pub options: SyncOptions,
+}
+
+#[derive(Subcommand)]
+pub enum SyncMetric {
+    /// Sync body weight only
+    Weight(SyncOptions),
+    /// Sync blood-pressure only
+    Bp(SyncOptions),
+    /// Sync both metrics (the default)
+    All(SyncOptions),
+}
+
+/// The metric scope of one sync run, resolved from [`SyncMetric`] (ADR-0005).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MetricScope {
+    Weight,
+    Bp,
+    All,
+}
+
+impl SyncMetric {
+    /// Split a parsed subcommand into its flags and the scope it selects.
+    pub fn into_parts(self) -> (SyncOptions, MetricScope) {
+        match self {
+            SyncMetric::Weight(options) => (options, MetricScope::Weight),
+            SyncMetric::Bp(options) => (options, MetricScope::Bp),
+            SyncMetric::All(options) => (options, MetricScope::All),
+        }
+    }
+}
+
+#[derive(Args)]
+pub struct SyncOptions {
     /// Write to Garmin Connect (default is a dry run)
     #[arg(long)]
     pub apply: bool,

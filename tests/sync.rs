@@ -101,8 +101,19 @@ fn run_sync(
     withings: &FakeServer,
     garmin: &FakeServer,
 ) -> common::Run {
-    let mut full: Vec<&str> = vec!["sync", "--config-dir", dir.path().to_str().unwrap()];
-    full.extend_from_slice(args);
+    let mut full: Vec<&str> = vec!["sync"];
+    // A metric subcommand must come directly after `sync`; the flags follow
+    // it (parent flags conflict with subcommands).
+    let rest: &[&str] = match args.first() {
+        Some(&"weight" | &"bp" | &"all") => {
+            full.push(args[0]);
+            &args[1..]
+        }
+        _ => args,
+    };
+    full.push("--config-dir");
+    full.push(dir.path().to_str().unwrap());
+    full.extend_from_slice(rest);
     run_bin(&full, &sync_env(withings, garmin))
 }
 
@@ -250,6 +261,223 @@ fn sync_invalid_date_exits_2() {
 
     assert_eq!(run.code, 2, "stdout: {}", run.stdout);
     assert!(run.stderr.contains("not-a-date"), "stderr: {}", run.stderr);
+}
+
+// ---------------------------------------------------------------------------
+// metric-scoped runs (ADR-0005 / ticket 14)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn sync_weight_reads_only_the_weight_meastype() {
+    let dir = TempDir::new();
+    write_valid_config_and_tokens(dir.path());
+    let withings = single_page_withings(vec![weight_group(82400, -3, EPOCH)]);
+    let garmin = ok_garmin();
+
+    let run = run_sync(&dir, &["weight"], &withings, &garmin);
+
+    assert_eq!(run.code, 0, "stderr: {}", run.stderr);
+    let reads = withings.requests_for("POST", "/measure");
+    assert_eq!(reads.len(), 1, "{:#?}", withings.requests());
+    assert_eq!(form_value(&parse_form(&reads[0].body), "meastypes"), "1");
+    // The report names weight only.
+    assert!(
+        run.stdout.contains("would write 1 weight measurements"),
+        "stdout: {}",
+        run.stdout
+    );
+    assert!(
+        !run.stdout.contains("blood-pressure"),
+        "stdout: {}",
+        run.stdout
+    );
+    assert!(
+        run.stdout.contains("summary: weight dry-run complete"),
+        "stdout: {}",
+        run.stdout
+    );
+}
+
+#[test]
+fn sync_bp_reads_only_the_bp_meastypes() {
+    let dir = TempDir::new();
+    write_valid_config_and_tokens(dir.path());
+    let withings = single_page_withings(vec![bp_group(120, 80, Some(72), EPOCH)]);
+    let garmin = ok_garmin();
+
+    let run = run_sync(&dir, &["bp"], &withings, &garmin);
+
+    assert_eq!(run.code, 0, "stderr: {}", run.stderr);
+    let reads = withings.requests_for("POST", "/measure");
+    assert_eq!(reads.len(), 1, "{:#?}", withings.requests());
+    assert_eq!(
+        form_value(&parse_form(&reads[0].body), "meastypes"),
+        "9,10,11"
+    );
+    assert!(
+        run.stdout
+            .contains("would write 1 blood-pressure measurements"),
+        "stdout: {}",
+        run.stdout
+    );
+    assert!(!run.stdout.contains("weight"), "stdout: {}", run.stdout);
+    assert!(
+        run.stdout
+            .contains("summary: blood-pressure dry-run complete"),
+        "stdout: {}",
+        run.stdout
+    );
+}
+
+#[test]
+fn bare_sync_requests_the_same_meastypes_as_sync_all() {
+    let dir = TempDir::new();
+    write_valid_config_and_tokens(dir.path());
+    let withings = single_page_withings(vec![]);
+    let garmin = ok_garmin();
+
+    let bare = run_sync(&dir, &[], &withings, &garmin);
+    let all = run_sync(&dir, &["all"], &withings, &garmin);
+
+    assert_eq!(bare.code, 0, "stderr: {}", bare.stderr);
+    assert_eq!(all.code, 0, "stderr: {}", all.stderr);
+    for run in [&bare, &all] {
+        assert!(
+            run.stdout.contains("summary: dry-run complete"),
+            "stdout: {}",
+            run.stdout
+        );
+    }
+    let reads = withings.requests_for("POST", "/measure");
+    assert_eq!(reads.len(), 2, "{:#?}", withings.requests());
+    for read in &reads {
+        assert_eq!(
+            form_value(&parse_form(&read.body), "meastypes"),
+            "1,9,10,11"
+        );
+    }
+}
+
+#[test]
+fn sync_weight_apply_never_touches_the_bp_endpoints() {
+    let dir = TempDir::new();
+    write_valid_config_and_tokens(dir.path());
+    let withings = single_page_withings(vec![weight_group(82400, -3, EPOCH)]);
+    let garmin = ok_garmin();
+
+    let run = run_sync(&dir, &["weight", "--apply"], &withings, &garmin);
+
+    assert_eq!(run.code, 0, "stderr: {}", run.stderr);
+    assert_eq!(
+        garmin
+            .requests_for("POST", "/weight-service/user-weight")
+            .len(),
+        1,
+        "{:#?}",
+        garmin.requests()
+    );
+    let bp_requests = garmin
+        .requests()
+        .into_iter()
+        .filter(|r| r.path.starts_with("/bloodpressure-service/bloodpressure"))
+        .count();
+    assert_eq!(bp_requests, 0, "{:#?}", garmin.requests());
+    assert!(
+        run.stdout
+            .contains("weight: 1 written, 0 skipped, 0 failed"),
+        "stdout: {}",
+        run.stdout
+    );
+    assert!(
+        !run.stdout.contains("blood-pressure"),
+        "stdout: {}",
+        run.stdout
+    );
+    assert!(
+        run.stdout.contains("summary: weight synced"),
+        "stdout: {}",
+        run.stdout
+    );
+}
+
+#[test]
+fn sync_bp_apply_never_touches_the_weight_endpoint() {
+    let dir = TempDir::new();
+    write_valid_config_and_tokens(dir.path());
+    let withings = single_page_withings(vec![bp_group(120, 80, Some(72), EPOCH)]);
+    let garmin = ok_garmin();
+
+    let run = run_sync(&dir, &["bp", "--apply"], &withings, &garmin);
+
+    assert_eq!(run.code, 0, "stderr: {}", run.stderr);
+    assert_eq!(
+        garmin
+            .requests_for("POST", "/weight-service/user-weight")
+            .len(),
+        0,
+        "{:#?}",
+        garmin.requests()
+    );
+    // The BP dedup read-back still happens for a bp-only run.
+    let bp_reads = garmin
+        .requests()
+        .into_iter()
+        .filter(|r| {
+            r.method == "GET"
+                && r.path
+                    .starts_with("/bloodpressure-service/bloodpressure/range")
+        })
+        .count();
+    assert_eq!(bp_reads, 1, "{:#?}", garmin.requests());
+    assert_eq!(
+        garmin
+            .requests_for("POST", "/bloodpressure-service/bloodpressure")
+            .len(),
+        1,
+        "{:#?}",
+        garmin.requests()
+    );
+    assert!(
+        run.stdout
+            .contains("blood-pressure: 1 written, 0 skipped, 0 failed"),
+        "stdout: {}",
+        run.stdout
+    );
+    assert!(!run.stdout.contains("weight"), "stdout: {}", run.stdout);
+    assert!(
+        run.stdout.contains("summary: blood-pressure synced"),
+        "stdout: {}",
+        run.stdout
+    );
+}
+
+#[test]
+fn sync_all_reports_both_metrics_like_bare_sync() {
+    let dir = TempDir::new();
+    write_valid_config_and_tokens(dir.path());
+    let withings = single_page_withings(vec![weight_group(82400, -3, EPOCH)]);
+    let garmin = ok_garmin();
+
+    let run = run_sync(&dir, &["all", "--apply"], &withings, &garmin);
+
+    assert_eq!(run.code, 0, "stderr: {}", run.stderr);
+    assert!(
+        run.stdout
+            .contains("weight: 1 written, 0 skipped, 0 failed"),
+        "stdout: {}",
+        run.stdout
+    );
+    assert!(
+        run.stdout
+            .contains("blood-pressure: 0 written, 0 skipped, 0 failed"),
+        "stdout: {}",
+        run.stdout
+    );
+    assert!(
+        run.stdout.contains("summary: all metrics synced"),
+        "stdout: {}",
+        run.stdout
+    );
 }
 
 // ---------------------------------------------------------------------------

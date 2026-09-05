@@ -12,9 +12,15 @@ blood-pressure measurements from Withings and writes them to Garmin Connect.
   (24 hours by default), not to calendar boundaries; no timezone logic.
 - **dry run** — the default `sync` mode: read, transform, print a would-write
   report, perform no writes. `--apply` turns writes on.
-- **apply** — the write mode (`sync --apply`): writes weight and
-  blood-pressure to Garmin, with per-metric failure isolation and
-  blood-pressure dedup-by-day read-back.
+- **apply** — the write mode (`sync --apply`, or metric-scoped like
+  `sync bp --apply`): writes weight and blood-pressure to Garmin, with
+  per-metric failure isolation and blood-pressure dedup-by-day read-back.
+- **metric-scoped run** — a `sync` invocation restricted to one metric by
+  subcommand: `sync weight` or `sync bp` (prose says "blood-pressure"; the
+  subcommand is `bp`). `sync` and `sync all` sync both metrics (ADR-0005).
+- **cadence** — how often the operator schedules a sync (cron/systemd).
+  Weight runs every 2 hours; blood-pressure once daily, in the evening,
+  because its dedup is day-granular.
 - **versioned release** — a GitHub Release created by pushing a `vX.Y.Z` tag
   whose version matches `Cargo.toml`. Carries the release assets (tarballs
   plus `SHA256SUMS`) built by the release pipeline.
@@ -31,3 +37,4 @@ blood-pressure measurements from Withings and writes them to Garmin Connect.
 - `docs/adr/` — ADR-0001: sync window resolution. ADR-0002: release
   pipeline for Linux and macOS. ADR-0003: aarch64 Linux release asset for
   Raspberry Pi 4. ADR-0004: static musl arm64 asset (Bullseye-compatible).
+  ADR-0005: per-metric sync subcommands and cadences.

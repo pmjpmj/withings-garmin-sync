@@ -10,7 +10,7 @@ use std::fs;
 use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
 
-use cli::{AuthArgs, Command, SyncArgs};
+use cli::{AuthArgs, Command, MetricScope, SyncArgs};
 
 pub const EXIT_OK: i32 = 0;
 pub const EXIT_METRIC_FAILURE: i32 = 1;
@@ -48,6 +48,29 @@ impl std::fmt::Display for AppError {
 }
 
 impl std::error::Error for AppError {}
+
+/// Scope membership and the Withings meastype mapping for one run
+/// (ADR-0005).
+impl MetricScope {
+    /// The Withings meastype set this scope requests.
+    fn meastypes(self) -> &'static str {
+        match self {
+            MetricScope::Weight => withings::WEIGHT_MEASTYPES,
+            MetricScope::Bp => withings::BP_MEASTYPES,
+            MetricScope::All => withings::ALL_MEASTYPES,
+        }
+    }
+
+    /// True when this run may touch the weight path.
+    fn includes_weight(self) -> bool {
+        self != MetricScope::Bp
+    }
+
+    /// True when this run may touch the blood-pressure path.
+    fn includes_bp(self) -> bool {
+        self != MetricScope::Weight
+    }
+}
 
 /// Run a parsed command, returning the process exit code or a terminal error.
 pub fn run(cli: cli::Cli) -> Result<i32, AppError> {
@@ -317,7 +340,16 @@ fn prompt_line(label: &str) -> Result<String, AppError> {
     Ok(trimmed)
 }
 
-fn run_sync(args: SyncArgs) -> Result<i32, AppError> {
+fn run_sync(cli_args: SyncArgs) -> Result<i32, AppError> {
+    // Resolve the metric scope: `sync weight` / `sync bp` / `sync all`;
+    // bare `sync` is `all` (ADR-0005). `args` becomes the chosen flag set.
+    let (args, scope) = match cli_args.metric {
+        Some(metric) => metric.into_parts(),
+        None => (cli_args.options, MetricScope::All),
+    };
+    let include_weight = scope.includes_weight();
+    let include_bp = scope.includes_bp();
+
     let dir = config::resolve_config_dir(args.config_dir.as_deref())?;
 
     // Fail fast on missing/invalid config or tokens (exit 3).
@@ -430,8 +462,15 @@ fn run_sync(args: SyncArgs) -> Result<i32, AppError> {
         }
     };
 
-    // Read the window from Withings once, then split into the two metrics.
-    let groups = withings::read_measures(&client, &tokens.withings.access_token, since, until)?;
+    // Read the window from Withings once, scoped to the metric(s) in play
+    // (ADR-0005): a single-metric run never fetches the other metric.
+    let groups = withings::read_measures(
+        &client,
+        &tokens.withings.access_token,
+        since,
+        until,
+        scope.meastypes(),
+    )?;
     let (weights, bps, skips) = transform::transform(groups);
 
     for skip in &skips {
@@ -447,11 +486,21 @@ fn run_sync(args: SyncArgs) -> Result<i32, AppError> {
     }
 
     if dry_run {
-        println!(
-            "dry-run ({window_label}): would write {} weight and {} blood-pressure measurements",
-            weights.len(),
-            bps.len()
-        );
+        match scope {
+            MetricScope::All => println!(
+                "dry-run ({window_label}): would write {} weight and {} blood-pressure measurements",
+                weights.len(),
+                bps.len()
+            ),
+            MetricScope::Weight => println!(
+                "dry-run ({window_label}): would write {} weight measurements",
+                weights.len()
+            ),
+            MetricScope::Bp => println!(
+                "dry-run ({window_label}): would write {} blood-pressure measurements",
+                bps.len()
+            ),
+        }
         for weight in &weights {
             println!(
                 "  weight: {} kg at {}",
@@ -472,12 +521,20 @@ fn run_sync(args: SyncArgs) -> Result<i32, AppError> {
                 timefmt::local_ms(bp.epoch)
             );
         }
-        println!("summary: dry-run complete");
+        // `summary:` names the metric(s) in play (ADR-0005, decision 6).
+        match scope {
+            MetricScope::All => println!("summary: dry-run complete"),
+            MetricScope::Weight => println!("summary: weight dry-run complete"),
+            MetricScope::Bp => println!("summary: blood-pressure dry-run complete"),
+        }
         return Ok(EXIT_OK);
     }
 
     // Apply: write each metric independently; one failing does not block the
     // other. A 401 refreshes the Garmin DI token once and retries.
+    // Weight has no skip path today (transform either emits a reading or
+    // stays silent on it), so this count is 0; it keeps the weight report
+    // line's "skipped" slot explicit rather than magic.
     let weight_skips = skips
         .iter()
         .filter(|s| s.metric == transform::Metric::Weight)
@@ -498,10 +555,10 @@ fn run_sync(args: SyncArgs) -> Result<i32, AppError> {
     // so before writing BP, read back the days Garmin already has and skip
     // any Withings reading on those days. Weight needs no read-back (its
     // endpoint dedups). A failed read-back fails the BP metric closed rather
-    // than risk duplicates.
+    // than risk duplicates. A weight-scoped run never touches this path.
     let mut bp_existing_days: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut bp_readback_failed = false;
-    if !bps.is_empty() {
+    if include_bp && !bps.is_empty() {
         let start_date = timefmt::local_date(since);
         let end_date = timefmt::local_date(until);
         match garmin_read(
@@ -526,66 +583,70 @@ fn run_sync(args: SyncArgs) -> Result<i32, AppError> {
     let mut weight_failed = 0usize;
     let mut bp_failed = 0usize;
     let mut bp_dedup_skipped = 0usize;
-    for weight in &weights {
-        let payload = garmin::weight_payload(
-            &timefmt::local_ms(weight.epoch),
-            &timefmt::gmt_ms(weight.epoch),
-            weight.kg,
-        );
-        match garmin_write(
-            &client,
-            &mut garmin_state,
-            &payload,
-            &tokens_path,
-            &mut tokens,
-            garmin::write_weight,
-        ) {
-            Ok(()) => {}
-            Err(error) if error.code == EXIT_AUTH => return Err(error),
-            Err(error) => {
-                eprintln!("error: weight write failed: {}", error.message);
-                weight_failed += 1;
+    if include_weight {
+        for weight in &weights {
+            let payload = garmin::weight_payload(
+                &timefmt::local_ms(weight.epoch),
+                &timefmt::gmt_ms(weight.epoch),
+                weight.kg,
+            );
+            match garmin_write(
+                &client,
+                &mut garmin_state,
+                &payload,
+                &tokens_path,
+                &mut tokens,
+                garmin::write_weight,
+            ) {
+                Ok(()) => {}
+                Err(error) if error.code == EXIT_AUTH => return Err(error),
+                Err(error) => {
+                    eprintln!("error: weight write failed: {}", error.message);
+                    weight_failed += 1;
+                }
             }
         }
     }
-    for bp in &bps {
-        if bp_readback_failed {
-            bp_failed += 1;
-            continue;
-        }
-        // Skip re-writes of days Garmin already has (ticket 12): the BP
-        // endpoint does not dedup by timestamp, so identical re-writes would
-        // duplicate. Day granularity is the finest the read-back exposes.
-        let day = timefmt::local_date(bp.epoch);
-        if bp_existing_days.contains(&day) {
-            eprintln!(
-                "warning: skipping blood-pressure reading at {}: {} already on Garmin",
-                timefmt::local_ms(bp.epoch),
-                day
-            );
-            bp_dedup_skipped += 1;
-            continue;
-        }
-        let payload = garmin::bp_payload(
-            &timefmt::local_ms(bp.epoch),
-            &timefmt::gmt_ms(bp.epoch),
-            bp.systolic,
-            bp.diastolic,
-            bp.pulse,
-        );
-        match garmin_write(
-            &client,
-            &mut garmin_state,
-            &payload,
-            &tokens_path,
-            &mut tokens,
-            garmin::write_blood_pressure,
-        ) {
-            Ok(()) => {}
-            Err(error) if error.code == EXIT_AUTH => return Err(error),
-            Err(error) => {
-                eprintln!("error: blood-pressure write failed: {}", error.message);
+    if include_bp {
+        for bp in &bps {
+            if bp_readback_failed {
                 bp_failed += 1;
+                continue;
+            }
+            // Skip re-writes of days Garmin already has (ticket 12): the BP
+            // endpoint does not dedup by timestamp, so identical re-writes would
+            // duplicate. Day granularity is the finest the read-back exposes.
+            let day = timefmt::local_date(bp.epoch);
+            if bp_existing_days.contains(&day) {
+                eprintln!(
+                    "warning: skipping blood-pressure reading at {}: {} already on Garmin",
+                    timefmt::local_ms(bp.epoch),
+                    day
+                );
+                bp_dedup_skipped += 1;
+                continue;
+            }
+            let payload = garmin::bp_payload(
+                &timefmt::local_ms(bp.epoch),
+                &timefmt::gmt_ms(bp.epoch),
+                bp.systolic,
+                bp.diastolic,
+                bp.pulse,
+            );
+            match garmin_write(
+                &client,
+                &mut garmin_state,
+                &payload,
+                &tokens_path,
+                &mut tokens,
+                garmin::write_blood_pressure,
+            ) {
+                Ok(()) => {}
+                Err(error) if error.code == EXIT_AUTH => return Err(error),
+                Err(error) => {
+                    eprintln!("error: blood-pressure write failed: {}", error.message);
+                    bp_failed += 1;
+                }
             }
         }
     }
@@ -595,19 +656,51 @@ fn run_sync(args: SyncArgs) -> Result<i32, AppError> {
         .len()
         .saturating_sub(bp_failed)
         .saturating_sub(bp_dedup_skipped);
-    println!(
-        "apply ({window_label}): weight: {weight_written} written, {weight_skips} skipped, {weight_failed} failed"
-    );
-    println!(
-        "apply ({window_label}): blood-pressure: {bp_written} written, {} skipped, {bp_failed} failed",
-        bp_skips + bp_dedup_skipped
-    );
+    let any_failed = weight_failed > 0 || bp_failed > 0;
 
-    if weight_failed > 0 || bp_failed > 0 {
-        println!("summary: 1 metric(s) failed");
-        Ok(EXIT_METRIC_FAILURE)
-    } else {
-        println!("summary: all metrics synced");
-        Ok(EXIT_OK)
+    // Reporting is metric-aware (ADR-0005): a single-metric run reports only
+    // its own metric and names it in the summary. Exit codes are unchanged.
+    match scope {
+        MetricScope::All => {
+            println!(
+                "apply ({window_label}): weight: {weight_written} written, {weight_skips} skipped, {weight_failed} failed"
+            );
+            println!(
+                "apply ({window_label}): blood-pressure: {bp_written} written, {} skipped, {bp_failed} failed",
+                bp_skips + bp_dedup_skipped
+            );
+            if any_failed {
+                println!("summary: 1 metric(s) failed");
+                Ok(EXIT_METRIC_FAILURE)
+            } else {
+                println!("summary: all metrics synced");
+                Ok(EXIT_OK)
+            }
+        }
+        MetricScope::Weight => {
+            println!(
+                "apply ({window_label}): weight: {weight_written} written, {weight_skips} skipped, {weight_failed} failed"
+            );
+            if any_failed {
+                println!("summary: weight failed");
+                Ok(EXIT_METRIC_FAILURE)
+            } else {
+                println!("summary: weight synced");
+                Ok(EXIT_OK)
+            }
+        }
+        MetricScope::Bp => {
+            println!(
+                "apply ({window_label}): blood-pressure: {bp_written} written, {} skipped, {bp_failed} failed",
+                bp_skips + bp_dedup_skipped
+            );
+            if any_failed {
+                println!("summary: blood-pressure failed");
+                Ok(EXIT_METRIC_FAILURE)
+            } else {
+                println!("summary: blood-pressure synced");
+                Ok(EXIT_OK)
+            }
+        }
     }
 }

@@ -137,6 +137,11 @@ withings-garmin-sync sync
 # Actually write to Garmin Connect.
 withings-garmin-sync sync --apply
 
+# Restrict a run to one metric (the other is untouched):
+withings-garmin-sync sync weight --apply   # weight only
+withings-garmin-sync sync bp --apply       # blood-pressure only
+withings-garmin-sync sync all --apply      # both (same as bare `sync`)
+
 # Bound the window (ISO YYYY-MM-DD). Defaults: last 24 hours.
 withings-garmin-sync sync --since 2026-01-01 --until 2026-06-01
 withings-garmin-sync sync --since 2026-01-01   # since ... until now
@@ -159,16 +164,23 @@ withings-garmin-sync --config-dir /tmp/wgs-test sync --verbose
 ### Scheduling
 
 `sync --apply` is non-interactive after `auth`, so it runs fine from cron or a
-systemd timer, e.g.:
+systemd timer. The metrics have different cadences (ADR-0005):
 
 ```cron
-# Daily at 08:15
-15 8 * * * /home/you/.cargo/bin/withings-garmin-sync sync --apply >> /home/you/.local/log/wgs.log 2>&1
+# Weight every 2 hours: Garmin dedups re-sends by timestamp, so frequent runs
+# are safe.
+0 */2 * * * /home/you/.cargo/bin/withings-garmin-sync sync weight --apply >> /home/you/.local/log/wgs-weight.log 2>&1
+
+# Blood pressure once a day, in the evening.
+15 21 * * * /home/you/.cargo/bin/withings-garmin-sync sync bp --apply >> /home/you/.local/log/wgs-bp.log 2>&1
 ```
 
-Safe to re-run: weight re-writes never double-count (Garmin deduplicates them
-by timestamp), and blood-pressure re-writes are skipped via a read-back of the
-days Garmin already has, so overlapping windows don't duplicate either metric.
+Weight re-writes never double-count (Garmin deduplicates them by timestamp),
+so the weight run can happen as often as you like. Blood pressure is
+**once-a-day**: its dedup is day-granular (a run skips any day Garmin already
+has), so a reading taken after that day's BP run is skipped by later runs too
+and cannot be recovered. Schedule the BP run in the evening, after your last
+reading of the day.
 
 ## Environment variables
 

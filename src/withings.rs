@@ -19,8 +19,13 @@ pub const REDIRECT_URI: &str = "http://localhost:8765/";
 const TOKEN_PATH: &str = "/v2/oauth2";
 const MEASURE_PATH: &str = "/measure";
 
-/// meastype codes the CLI reads: weight, systolic BP, diastolic BP, pulse.
-pub const MEASURE_TYPES: &str = "1,9,10,11";
+/// meastype code the CLI reads for weight: 1 = weight (kg).
+pub const WEIGHT_MEASTYPES: &str = "1";
+/// meastype codes the CLI reads for blood pressure: 9 = diastolic, 10 =
+/// systolic, 11 = pulse.
+pub const BP_MEASTYPES: &str = "9,10,11";
+/// Every meastype code the CLI reads.
+pub const ALL_MEASTYPES: &str = "1,9,10,11";
 /// Safety cap on pagination, so a misbehaving `more` cannot loop forever.
 const MAX_PAGES: usize = 50;
 
@@ -60,12 +65,15 @@ fn post_with_601_retry<T>(
 
 /// Read the measurement window from Withings (`action=getmeas`), following
 /// the response's `more`/`offset` fields until there are no more pages.
-/// Withings `601` rate-limit responses are retried with backoff.
+/// `meastypes` is the comma-separated set of meastype codes to request
+/// (ADR-0005 scopes it per metric). Withings `601` rate-limit responses are
+/// retried with backoff.
 pub fn read_measures(
     client: &HttpClient,
     access_token: &str,
     startdate: i64,
     enddate: i64,
+    meastypes: &str,
 ) -> Result<Vec<MeasureGroup>, AppError> {
     let url = client.withings_url(MEASURE_PATH);
     let auth = format!("Bearer {access_token}");
@@ -75,7 +83,7 @@ pub fn read_measures(
     for _page in 0..MAX_PAGES {
         let fields = vec![
             ("action".to_string(), "getmeas".to_string()),
-            ("meastypes".to_string(), MEASURE_TYPES.to_string()),
+            ("meastypes".to_string(), meastypes.to_string()),
             ("startdate".to_string(), startdate.to_string()),
             ("enddate".to_string(), enddate.to_string()),
             ("offset".to_string(), offset.to_string()),

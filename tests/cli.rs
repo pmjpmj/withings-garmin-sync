@@ -37,6 +37,52 @@ fn help_lists_subcommands_and_flags() {
 }
 
 #[test]
+fn sync_help_lists_metric_subcommands() {
+    let run = run_bin(&["sync", "--help"], &[]);
+    assert_eq!(run.code, 0, "stderr: {}", run.stderr);
+    for sub in ["weight", "bp", "all"] {
+        assert!(
+            run.stdout.contains(sub),
+            "missing {sub} in help: {}",
+            run.stdout
+        );
+    }
+}
+
+#[test]
+fn sync_metric_subcommand_help_lists_flags() {
+    let run = run_bin(&["sync", "weight", "--help"], &[]);
+    assert_eq!(run.code, 0, "stderr: {}", run.stderr);
+    for flag in ["--apply", "--dry-run", "--since", "--until"] {
+        assert!(
+            run.stdout.contains(flag),
+            "missing {flag} in help: {}",
+            run.stdout
+        );
+    }
+}
+
+#[test]
+fn sync_unknown_metric_subcommand_exits_2() {
+    let run = run_bin(&["sync", "frobnicate"], &[]);
+    assert_eq!(run.code, 2);
+    assert!(run.stderr.contains("unrecognized subcommand"));
+}
+
+#[test]
+fn sync_flags_conflict_with_metric_subcommands() {
+    // Flags belong on the subcommand (`sync weight --apply`); a flag before
+    // the subcommand is rejected loudly rather than silently ignored.
+    let run = run_bin(&["sync", "--apply", "weight"], &[]);
+    assert_eq!(run.code, 2);
+    assert!(
+        run.stderr.contains("cannot be used with"),
+        "stderr: {}",
+        run.stderr
+    );
+}
+
+#[test]
 fn version_prints_name_and_version() {
     let run = run_bin(&["--version"], &[]);
     assert_eq!(run.code, 0, "stderr: {}", run.stderr);
