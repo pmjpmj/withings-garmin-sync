@@ -107,6 +107,19 @@ It will:
 5. If MFA is required, prompt for the code (up to three attempts).
 6. Exchange both logins for tokens and store them.
 
+The two services' sessions die in different ways (Withings tokens expire on
+their own clock; Garmin kills sessions on external events like a password
+change or MFA policy). Repair one service without re-doing the other (ADR-0006):
+
+```sh
+withings-garmin-sync auth withings   # re-do only the Withings browser OAuth
+withings-garmin-sync auth garmin     # re-do only the Garmin username/password/MFA login
+```
+
+Each command replaces only its own section of `tokens.json`; the other
+service's tokens are left untouched. `auth garmin` needs no `config.toml`.
+Bare `auth` stays the first-run path: it authenticates both services.
+
 Files are written under `~/.config/withings-garmin-sync/` (override with
 `--config-dir <dir>`):
 
@@ -159,7 +172,7 @@ withings-garmin-sync --config-dir /tmp/wgs-test sync --verbose
 | `1` | Partial or total metric failure (the report says which metric and how many) |
 | `2` | Usage error (unknown flag/subcommand, invalid window) |
 | `3` | Config error — missing/invalid config or tokens; run `auth` first |
-| `4` | Auth error — a token refresh was rejected; re-run `auth` |
+| `4` | Auth error — a token refresh was rejected; the message names the service: re-run `auth withings` or re-run `auth garmin` |
 
 ### Scheduling
 

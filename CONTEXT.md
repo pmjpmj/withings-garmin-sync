@@ -31,10 +31,15 @@ blood-pressure measurements from Withings and writes them to Garmin Connect.
   version; the pipeline verifies it and hard-fails on mismatch. Version
   bumps happen on `main` before tagging; the pipeline never edits the
   manifest.
+- **per-service auth** — re-authenticating one service without the other:
+  `auth withings` or `auth garmin`. Bare `auth` authenticates both (the
+  first-run path). Each command replaces only its own section of
+  `tokens.json`. See ADR-0006.
 
 ## Decisions
 
 - `docs/adr/` — ADR-0001: sync window resolution. ADR-0002: release
   pipeline for Linux and macOS. ADR-0003: aarch64 Linux release asset for
   Raspberry Pi 4. ADR-0004: static musl arm64 asset (Bullseye-compatible).
-  ADR-0005: per-metric sync subcommands and cadences.
+  ADR-0005: per-metric sync subcommands and cadences. ADR-0006: per-service
+  auth subcommands.

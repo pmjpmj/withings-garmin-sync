@@ -125,7 +125,7 @@ fn expired_withings_token_is_refreshed_before_reads() {
 }
 
 #[test]
-fn rejected_withings_refresh_exits_4_and_tells_to_reauth() {
+fn rejected_withings_refresh_exits_4_and_names_the_withings_auth_command() {
     let dir = TempDir::new();
     write_file(&dir.path().join("config.toml"), CONFIG);
     write_tokens(&dir, "wa-stale", 1, "ga");
@@ -139,7 +139,7 @@ fn rejected_withings_refresh_exits_4_and_tells_to_reauth() {
 
     assert_eq!(run.code, 4, "stdout: {}", run.stdout);
     assert!(
-        run.stderr.contains("re-run `auth`"),
+        run.stderr.contains("re-run `auth withings`"),
         "stderr: {}",
         run.stderr
     );
@@ -217,7 +217,7 @@ fn rejected_garmin_refresh_aborts_with_exit_4() {
 
     assert_eq!(run.code, 4, "stdout: {}", run.stdout);
     assert!(
-        run.stderr.contains("re-run `auth`"),
+        run.stderr.contains("re-run `auth garmin`"),
         "stderr: {}",
         run.stderr
     );

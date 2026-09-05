@@ -69,7 +69,7 @@ Credentials and settings live in plaintext under `~/.config/withings-garmin-sync
 ### CLI surface
 
 - Two subcommands:
-  - `auth` — interactive, first-run only. Connects Withings (OAuth authorization code flow) and Garmin (mobile-SSO username/password, optional MFA), then persists tokens.
+  - `auth` — interactive. Bare `auth` connects Withings (OAuth authorization code flow) and Garmin (mobile-SSO username/password, optional MFA) and persists both token halves — the first-run path. Per-service repair commands `auth withings` and `auth garmin` re-authenticate one service and replace only that service's section of `tokens.json` (ADR-0006); `auth withings` owns the Withings credentials in `config.toml`, `auth garmin` needs no config.
   - `sync` — non-interactive. Reads the window from Withings, transforms, and (with `--apply`) writes to Garmin.
 - `sync` flags:
   - `--dry-run` (default): authenticate, read, transform, and print a would-write report; perform **no** writes.
@@ -77,7 +77,7 @@ Credentials and settings live in plaintext under `~/.config/withings-garmin-sync
   - `--since <date>`, `--until <date>`: bound the sync window (ISO `YYYY-MM-DD`). Default window when omitted is the last 24 hours (rolling); `--since` without `--until` means "since … until now".
   - `--config-dir <path>`: override the config directory (default `~/.config/withings-garmin-sync`).
   - `--verbose`: log each request/response.
-- `auth` may also accept `--config-dir`.
+- `auth` flags: `--config-dir <path>` and `--verbose` on the subcommand (`auth withings --config-dir <path>`); bare `auth` accepts them directly. Auth commands are always fully interactive (no silent refresh attempt; refresh is `sync`'s job).
 
 ### Exit codes
 
@@ -85,7 +85,7 @@ Credentials and settings live in plaintext under `~/.config/withings-garmin-sync
 - `1` — partial or total metric failure (at least one metric failed to sync; the report says which).
 - `2` — usage error (unknown flag/subcommand).
 - `3` — config error (missing/invalid config or tokens; instructs to run `auth`).
-- `4` — auth error (token refresh rejected; re-authentication required).
+- `4` — auth error (token refresh rejected; the message names the repair command: "re-run `auth withings`" or "re-run `auth garmin`").
 
 Per-metric independence means exit `1` is used for any mix of success and failure across metrics; the human-readable summary and report carry the detail.
 
@@ -213,7 +213,7 @@ No `JWT_FGP` cookie, no `DI-Backend`, no `NK: NT` — those belong to a legacy f
 - Withings `601` and Garmin `429` (which may appear as HTTP status **or** inside a JSON `error.status-code`) are distinguished and retried with backoff.
 - Garmin `412` with the EU upload-consent message is surfaced as a specific, actionable error: the user must grant "upload consent" in Garmin Connect account settings. The CLI cannot grant it programmatically.
 - Missing config/tokens → exit `3` with "run `auth` first".
-- A rejected token refresh → exit `4` with "re-run `auth`".
+- A rejected token refresh → exit `4`; the message names the failed service: "re-run `auth withings`" or "re-run `auth garmin`".
 
 ## Testing Decisions
 

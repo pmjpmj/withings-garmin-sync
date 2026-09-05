@@ -213,7 +213,7 @@ pub fn extract_code(pasted: &str, state: &str) -> Result<String, AppError> {
         if echoed != state {
             return Err(AppError::new(
                 crate::EXIT_AUTH,
-                "the pasted redirect's state does not match this run; re-run `auth`",
+                "the pasted redirect's state does not match this run; re-run `auth withings`",
             ));
         }
     }

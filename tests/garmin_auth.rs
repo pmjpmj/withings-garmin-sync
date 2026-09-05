@@ -375,7 +375,7 @@ fn auth_retries_di_client_ids_in_order() {
 }
 
 #[test]
-fn auth_invalid_username_password_exits_4_without_tokens() {
+fn auth_invalid_username_password_exits_4_without_garmin_tokens() {
     let dir = TempDir::new();
     write_config(&dir);
     let withings = withings_server();
@@ -410,10 +410,17 @@ fn auth_invalid_username_password_exits_4_without_tokens() {
         "stderr: {}",
         run.stderr
     );
-    assert!(
-        !dir.path().join("tokens.json").exists(),
-        "no tokens must be persisted on a failed login"
-    );
+    // The failed half persists nothing; the withings half (which already
+    // succeeded) keeps its own section (ADR-0006 read-modify-write).
+    let tokens_path = dir.path().join("tokens.json");
+    if tokens_path.exists() {
+        let tokens: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&tokens_path).unwrap()).unwrap();
+        assert_eq!(
+            tokens["garmin"]["access_token"], "",
+            "no garmin tokens may be persisted on a failed login: {tokens}"
+        );
+    }
 }
 
 #[test]
@@ -450,7 +457,17 @@ fn auth_di_exchange_total_failure_exits_4() {
             .len(),
         3
     );
-    assert!(!dir.path().join("tokens.json").exists());
+    // The failed exchange persists no garmin tokens (ADR-0006: each half of
+    // `auth` replaces only its own section).
+    let tokens_path = dir.path().join("tokens.json");
+    if tokens_path.exists() {
+        let tokens: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&tokens_path).unwrap()).unwrap();
+        assert_eq!(
+            tokens["garmin"]["access_token"], "",
+            "no garmin tokens may be persisted on a failed DI exchange: {tokens}"
+        );
+    }
 }
 
 #[test]

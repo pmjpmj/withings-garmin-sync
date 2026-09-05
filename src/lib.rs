@@ -9,8 +9,9 @@ pub mod withings;
 use std::fs;
 use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
+use std::path::Path;
 
-use cli::{AuthArgs, Command, MetricScope, SyncArgs};
+use cli::{AuthArgs, AuthServiceKind, Command, MetricScope, SyncArgs};
 
 pub const EXIT_OK: i32 = 0;
 pub const EXIT_METRIC_FAILURE: i32 = 1;
@@ -81,7 +82,14 @@ pub fn run(cli: cli::Cli) -> Result<i32, AppError> {
 }
 
 fn run_auth(args: AuthArgs) -> Result<i32, AppError> {
-    let dir = config::resolve_config_dir(args.config_dir.as_deref())?;
+    // Resolve the target service: `auth withings` / `auth garmin` run one
+    // service alone; bare `auth` runs both, back-compatible (ADR-0006).
+    let (options, service) = match args.service {
+        Some(service) => service.into_parts(),
+        None => (args.options, AuthServiceKind::Both),
+    };
+
+    let dir = config::resolve_config_dir(options.config_dir.as_deref())?;
     fs::create_dir_all(&dir).map_err(|error| {
         AppError::config(format!("could not create {}: {error}", dir.display()))
     })?;
@@ -92,9 +100,35 @@ fn run_auth(args: AuthArgs) -> Result<i32, AppError> {
         ))
     })?;
 
-    // Load the config if one exists, else start from the skeleton. `auth`
-    // tolerates empty credentials because it prompts for them next.
-    let config_path = config::config_path(&dir);
+    let client = http::HttpClient::new(http::BaseUrls::from_env()).with_verbose(options.verbose);
+    if options.verbose {
+        eprintln!("[verbose] config dir: {}", dir.display());
+        client.log_base_urls();
+    }
+
+    match service {
+        AuthServiceKind::Both => {
+            run_auth_withings(&client, &dir)?;
+            run_auth_garmin(&client, &dir)?;
+        }
+        AuthServiceKind::Withings => run_auth_withings(&client, &dir)?,
+        AuthServiceKind::Garmin => run_auth_garmin(&client, &dir)?,
+    }
+
+    println!(
+        "auth: tokens stored in {} (plaintext, 0600); keep this file private",
+        config::tokens_path(&dir).display()
+    );
+    Ok(EXIT_OK)
+}
+
+/// The Withings half of `auth`: credentials prompt (when missing), browser
+/// OAuth code exchange, and a withings-only section replace of `tokens.json`
+/// (ADR-0006, decisions 3–5).
+fn run_auth_withings(client: &http::HttpClient, dir: &Path) -> Result<(), AppError> {
+    // Load the config if one exists, else start from the skeleton. `auth
+    // withings` tolerates empty credentials because it prompts for them next.
+    let config_path = config::config_path(dir);
     let mut config = if config_path.exists() {
         let text = fs::read_to_string(&config_path).map_err(|error| {
             AppError::config(format!("could not read {}: {error}", config_path.display()))
@@ -111,20 +145,18 @@ fn run_auth(args: AuthArgs) -> Result<i32, AppError> {
 
     // One-time interactive Withings OAuth (ticket 05).
     if config.withings.client_id.trim().is_empty() {
-        config.withings.client_id =
-            prompt_line("Withings client id (from the Withings developer portal): ")?;
+        config.withings.client_id = prompt_line(
+            "Withings client id (from the Withings developer portal): ",
+            "auth withings",
+        )?;
     }
     if config.withings.client_secret.trim().is_empty() {
-        config.withings.client_secret =
-            prompt_line("Withings client secret (from the Withings developer portal): ")?;
+        config.withings.client_secret = prompt_line(
+            "Withings client secret (from the Withings developer portal): ",
+            "auth withings",
+        )?;
     }
     config::write_config(&config_path, &config)?;
-
-    let client = http::HttpClient::new(http::BaseUrls::from_env()).with_verbose(args.verbose);
-    if args.verbose {
-        eprintln!("[verbose] config dir: {}", dir.display());
-        client.log_base_urls();
-    }
 
     let state = withings::generate_state();
     let authorize_url = withings::authorize_url(&config.withings.client_id, &state);
@@ -136,21 +168,45 @@ fn run_auth(args: AuthArgs) -> Result<i32, AppError> {
     );
     let _ = std::io::stdout().flush();
 
-    let pasted =
-        prompt_line("Paste the redirect URL (or the bare code) your browser was sent to: ")?;
+    let pasted = prompt_line(
+        "Paste the redirect URL (or the bare code) your browser was sent to: ",
+        "auth withings",
+    )?;
     let code = withings::extract_code(&pasted, &state)?;
 
     let withings_tokens = withings::exchange_code(
-        &client,
+        client,
         &config.withings.client_id,
         &config.withings.client_secret,
         &code,
     )?;
 
+    // Read-modify-write: replace only the withings section of the shared
+    // token file; the garmin section (if any) is left as loaded.
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    update_tokens_section(dir, |tokens| {
+        tokens.withings = config::WithingsTokens {
+            access_token: withings_tokens.access_token,
+            refresh_token: withings_tokens.refresh_token.unwrap_or_default(),
+            expires_at: Some(now + withings_tokens.expires_in),
+        };
+    })?;
+
+    println!("auth: Withings connected (scope: user.metrics).");
+    Ok(())
+}
+
+/// The Garmin half of `auth`: username/password (+MFA) login and a
+/// garmin-only section replace of `tokens.json`. Needs no config at all
+/// (ADR-0006, decisions 3–5).
+fn run_auth_garmin(client: &http::HttpClient, dir: &Path) -> Result<(), AppError> {
     // One-time interactive Garmin mobile-SSO login (ticket 06).
-    let username = prompt_line("Garmin username (email): ")?;
-    let password = prompt_line("Garmin password: ")?;
-    let service_ticket = match garmin::login(&client, &username, &password)? {
+    let username = prompt_line("Garmin username (email): ", "auth garmin")?;
+    let password = prompt_line("Garmin password: ", "auth garmin")?;
+    let service_ticket = match garmin::login(client, &username, &password)? {
         garmin::LoginOutcome::Success { service_ticket } => service_ticket,
         garmin::LoginOutcome::MfaRequired { method } => {
             let mut attempts = 0;
@@ -159,11 +215,14 @@ fn run_auth(args: AuthArgs) -> Result<i32, AppError> {
                 if attempts > 3 {
                     return Err(AppError::new(
                         EXIT_AUTH,
-                        "too many rejected MFA codes; re-run `auth` to try again",
+                        "too many rejected MFA codes; re-run `auth garmin` to try again",
                     ));
                 }
-                let code = prompt_line(&format!("Garmin MFA code (sent via {method}): "))?;
-                match garmin::verify_mfa(&client, &method, &code)? {
+                let code = prompt_line(
+                    &format!("Garmin MFA code (sent via {method}): "),
+                    "auth garmin",
+                )?;
+                match garmin::verify_mfa(client, &method, &code)? {
                     garmin::MfaOutcome::Ticket(ticket) => break ticket,
                     garmin::MfaOutcome::InvalidCode => {
                         eprintln!("auth: Garmin rejected that MFA code; try again");
@@ -172,39 +231,41 @@ fn run_auth(args: AuthArgs) -> Result<i32, AppError> {
             }
         }
     };
-    let garmin_tokens = garmin::exchange_service_ticket(&client, &service_ticket)?;
+    let garmin_tokens = garmin::exchange_service_ticket(client, &service_ticket)?;
 
-    // Only now persist tokens: a failure in either half of `auth` must not
-    // leave a partial token file behind.
-    let tokens_path = config::tokens_path(&dir);
-    let mut tokens = if tokens_path.exists() {
-        config::load_tokens(&dir)?
-    } else {
-        config::Tokens::default()
-    };
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    tokens.withings = config::WithingsTokens {
-        access_token: withings_tokens.access_token,
-        refresh_token: withings_tokens.refresh_token.unwrap_or_default(),
-        expires_at: Some(now + withings_tokens.expires_in),
-    };
-    tokens.garmin = config::GarminTokens {
-        access_token: garmin_tokens.access_token,
-        refresh_token: garmin_tokens.refresh_token.unwrap_or_default(),
-        client_id: Some(garmin_tokens.client_id),
-    };
-    config::write_tokens(&tokens_path, &tokens)?;
+    // Read-modify-write: replace only the garmin section of the shared token
+    // file; the withings section (if any) is left as loaded.
+    update_tokens_section(dir, |tokens| {
+        tokens.garmin = config::GarminTokens {
+            access_token: garmin_tokens.access_token,
+            refresh_token: garmin_tokens.refresh_token.unwrap_or_default(),
+            client_id: Some(garmin_tokens.client_id),
+        };
+    })?;
 
-    println!("auth: Withings connected (scope: user.metrics).");
     println!("auth: Garmin connected.");
-    println!(
-        "auth: tokens stored in {} (plaintext, 0600); keep this file private",
-        tokens_path.display()
-    );
-    Ok(EXIT_OK)
+    Ok(())
+}
+
+/// Tokens for one auth run: the existing file when present, else defaults.
+/// A malformed existing file is a config error (never silently overwritten).
+fn load_tokens_or_default(dir: &Path) -> Result<config::Tokens, AppError> {
+    if config::tokens_path(dir).exists() {
+        config::load_tokens(dir)
+    } else {
+        Ok(config::Tokens::default())
+    }
+}
+
+/// Replace one section of the shared `tokens.json` in place, leaving the
+/// other service's section as loaded (ADR-0006, decision 3).
+fn update_tokens_section<F>(dir: &Path, replace: F) -> Result<(), AppError>
+where
+    F: FnOnce(&mut config::Tokens),
+{
+    let mut tokens = load_tokens_or_default(dir)?;
+    replace(&mut tokens);
+    config::write_tokens(&config::tokens_path(dir), &tokens)
 }
 
 /// Mutable Garmin DI token state for one sync run.
@@ -216,7 +277,7 @@ struct GarminTokenState {
 
 /// Write one Garmin record. A `401` triggers a DI token refresh (persisted)
 /// followed by a single retry; a rejected refresh is returned as an auth
-/// error (`EXIT_AUTH`) so the run aborts with "re-run `auth`".
+/// error (`EXIT_AUTH`) so the run aborts with "re-run `auth garmin`".
 fn garmin_write<F>(
     client: &http::HttpClient,
     state: &mut GarminTokenState,
@@ -236,7 +297,7 @@ where
                     AppError::new(
                         EXIT_AUTH,
                         format!(
-                            "Garmin token refresh failed: {}; re-run `auth`",
+                            "Garmin token refresh failed: {}; re-run `auth garmin`",
                             error.message
                         ),
                     )
@@ -270,7 +331,7 @@ where
 
 /// Read one Garmin record. A `401` triggers a DI token refresh (persisted)
 /// followed by a single retry; a rejected refresh is returned as an auth
-/// error (`EXIT_AUTH`) so the run aborts with "re-run `auth`".
+/// error (`EXIT_AUTH`) so the run aborts with "re-run `auth garmin`".
 fn garmin_read<F, T>(
     client: &http::HttpClient,
     state: &mut GarminTokenState,
@@ -289,7 +350,7 @@ where
                     AppError::new(
                         EXIT_AUTH,
                         format!(
-                            "Garmin token refresh failed: {}; re-run `auth`",
+                            "Garmin token refresh failed: {}; re-run `auth garmin`",
                             error.message
                         ),
                     )
@@ -322,8 +383,9 @@ where
 }
 
 /// Read one line of operator input, prompting on stderr so stdout stays
-/// report-only. Empty input (closed stdin) is an auth error.
-fn prompt_line(label: &str) -> Result<String, AppError> {
+/// report-only. Empty input (closed stdin) is an auth error. `retry` names
+/// the command to re-run (e.g. `auth withings` or `auth garmin`).
+fn prompt_line(label: &str, retry: &str) -> Result<String, AppError> {
     eprint!("{label}");
     std::io::stderr().flush().ok();
     let mut line = String::new();
@@ -334,7 +396,7 @@ fn prompt_line(label: &str) -> Result<String, AppError> {
     if trimmed.is_empty() {
         return Err(AppError::new(
             EXIT_AUTH,
-            "no input provided (stdin closed); re-run `auth` to continue",
+            format!("no input provided (stdin closed); re-run `{retry}` to continue"),
         ));
     }
     Ok(trimmed)
@@ -399,7 +461,7 @@ fn run_sync(cli_args: SyncArgs) -> Result<i32, AppError> {
             AppError::new(
                 EXIT_AUTH,
                 format!(
-                    "Withings token refresh failed: {}; re-run `auth`",
+                    "Withings token refresh failed: {}; re-run `auth withings`",
                     error.message
                 ),
             )

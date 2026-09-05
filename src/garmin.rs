@@ -578,7 +578,7 @@ pub fn refresh(
     if refresh_token.trim().is_empty() {
         return Err(AppError::new(
             crate::EXIT_AUTH,
-            "no Garmin refresh token stored; re-run `auth`",
+            "no Garmin refresh token stored; re-run `auth garmin`",
         ));
     }
     let url = client.garmin_diauth_url(DI_TOKEN_PATH);
