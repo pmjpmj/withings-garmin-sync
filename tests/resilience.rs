@@ -146,6 +146,199 @@ fn rejected_withings_refresh_exits_4_and_names_the_withings_auth_command() {
 }
 
 // ---------------------------------------------------------------------------
+// Withings mid-run auth recovery (ADR-0007): 401/403/body-401 -> refresh ->
+// single retry
+// ---------------------------------------------------------------------------
+
+#[test]
+fn withings_401_mid_read_refreshes_token_and_retries_once() {
+    let dir = TempDir::new();
+    write_file(&dir.path().join("config.toml"), CONFIG);
+    write_tokens(&dir, "wa-stale", now_epoch_plus(3600), "ga");
+    let withings = FakeServer::start(vec![
+        Route::post("/measure", |req, call| {
+            if call == 0 {
+                assert_eq!(req.header("authorization").unwrap(), "Bearer wa-stale");
+                FakeResponse::new(401, "unauthorized")
+            } else {
+                assert_eq!(req.header("authorization").unwrap(), "Bearer wa-new");
+                empty_measures()
+            }
+        }),
+        Route::post("/v2/oauth2", |_req, _i| {
+            FakeResponse::json(
+                200,
+                r#"{"status":0,"body":{"access_token":"wa-new","refresh_token":"wa-refresh-2","expires_in":10800,"scope":"user.metrics","token_type":"Bearer"}}"#,
+            )
+        }),
+    ]);
+    let garmin = FakeServer::start(vec![]);
+    let diauth = FakeServer::start(vec![]);
+
+    let run = run_sync(&dir, &[], &sync_env(&withings, &garmin, &diauth));
+
+    assert_eq!(run.code, 0, "stderr: {}", run.stderr);
+
+    // The stale-token read fails first, then the refresh, then the retry.
+    let requests = withings.requests();
+    assert_eq!(requests.len(), 3, "{requests:#?}");
+    assert_eq!(requests[0].path, "/measure");
+    assert_eq!(requests[1].path, "/v2/oauth2");
+    let fields = parse_form(&requests[1].body);
+    assert_eq!(form_value(&fields, "grant_type"), "refresh_token");
+    assert_eq!(form_value(&fields, "refresh_token"), "wa-refresh");
+    assert_eq!(form_value(&fields, "client_id"), "test-client-id");
+    assert_eq!(form_value(&fields, "client_secret"), "test-client-secret");
+    assert_eq!(requests[2].path, "/measure");
+    assert_eq!(
+        requests[2].header("authorization").unwrap(),
+        "Bearer wa-new"
+    );
+
+    // The retry restarts the paginated read from page 0.
+    let reads = withings.requests_for("POST", "/measure");
+    assert_eq!(reads.len(), 2);
+    let retry_fields = parse_form(&reads[1].body);
+    assert_eq!(form_value(&retry_fields, "offset"), "0");
+
+    // The rotated tokens (and new expiry) are persisted.
+    let tokens = read_tokens(&dir);
+    assert_eq!(tokens["withings"]["access_token"], "wa-new");
+    assert_eq!(tokens["withings"]["refresh_token"], "wa-refresh-2");
+    let expires = tokens["withings"]["expires_at"].as_u64().unwrap();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    assert!(expires > now + 10000, "expiry {expires} not in the future");
+}
+
+#[test]
+fn withings_403_mid_read_refreshes_token_and_retries_once() {
+    let dir = TempDir::new();
+    write_file(&dir.path().join("config.toml"), CONFIG);
+    write_tokens(&dir, "wa-stale", now_epoch_plus(3600), "ga");
+    let withings = FakeServer::start(vec![
+        Route::post("/measure", |_req, call| {
+            if call == 0 {
+                FakeResponse::new(403, "forbidden")
+            } else {
+                empty_measures()
+            }
+        }),
+        Route::post("/v2/oauth2", |_req, _i| {
+            FakeResponse::json(
+                200,
+                r#"{"status":0,"body":{"access_token":"wa-new","refresh_token":"wa-refresh-2","expires_in":10800,"scope":"user.metrics","token_type":"Bearer"}}"#,
+            )
+        }),
+    ]);
+    let garmin = FakeServer::start(vec![]);
+    let diauth = FakeServer::start(vec![]);
+
+    let run = run_sync(&dir, &[], &sync_env(&withings, &garmin, &diauth));
+
+    assert_eq!(run.code, 0, "stderr: {}", run.stderr);
+    assert_eq!(withings.requests_for("POST", "/measure").len(), 2);
+    assert_eq!(withings.requests_for("POST", "/v2/oauth2").len(), 1);
+}
+
+#[test]
+fn withings_body_status_401_triggers_refresh_and_retry() {
+    let dir = TempDir::new();
+    write_file(&dir.path().join("config.toml"), CONFIG);
+    write_tokens(&dir, "wa-stale", now_epoch_plus(3600), "ga");
+    let withings = FakeServer::start(vec![
+        Route::post("/measure", |_req, call| {
+            if call == 0 {
+                FakeResponse::json(200, r#"{"status":401}"#)
+            } else {
+                empty_measures()
+            }
+        }),
+        Route::post("/v2/oauth2", |_req, _i| {
+            FakeResponse::json(
+                200,
+                r#"{"status":0,"body":{"access_token":"wa-new","refresh_token":"wa-refresh-2","expires_in":10800,"scope":"user.metrics","token_type":"Bearer"}}"#,
+            )
+        }),
+    ]);
+    let garmin = FakeServer::start(vec![]);
+    let diauth = FakeServer::start(vec![]);
+
+    let run = run_sync(&dir, &[], &sync_env(&withings, &garmin, &diauth));
+
+    assert_eq!(run.code, 0, "stderr: {}", run.stderr);
+    assert_eq!(withings.requests_for("POST", "/measure").len(), 2);
+    assert_eq!(withings.requests_for("POST", "/v2/oauth2").len(), 1);
+}
+
+#[test]
+fn rejected_withings_mid_read_refresh_exits_4_without_retry() {
+    let dir = TempDir::new();
+    write_file(&dir.path().join("config.toml"), CONFIG);
+    write_tokens(&dir, "wa-stale", now_epoch_plus(3600), "ga");
+    let withings = FakeServer::start(vec![
+        Route::post("/measure", |_req, _i| {
+            FakeResponse::new(401, "unauthorized")
+        }),
+        Route::post("/v2/oauth2", |_req, _i| {
+            FakeResponse::json(200, r#"{"status": 2557}"#)
+        }),
+    ]);
+    let garmin = FakeServer::start(vec![]);
+    let diauth = FakeServer::start(vec![]);
+
+    let run = run_sync(&dir, &[], &sync_env(&withings, &garmin, &diauth));
+
+    assert_eq!(run.code, 4, "stdout: {}", run.stdout);
+    assert!(
+        run.stderr.contains("re-run `auth withings`"),
+        "stderr: {}",
+        run.stderr
+    );
+    // No retry read after the failed refresh.
+    assert_eq!(withings.requests_for("POST", "/measure").len(), 1);
+}
+
+#[test]
+fn withings_fresh_token_still_rejected_exits_4() {
+    let dir = TempDir::new();
+    write_file(&dir.path().join("config.toml"), CONFIG);
+    write_tokens(&dir, "wa-stale", now_epoch_plus(3600), "ga");
+    let withings = FakeServer::start(vec![
+        Route::post("/measure", |_req, _i| {
+            FakeResponse::new(401, "unauthorized")
+        }),
+        Route::post("/v2/oauth2", |_req, _i| {
+            FakeResponse::json(
+                200,
+                r#"{"status":0,"body":{"access_token":"wa-new","refresh_token":"wa-refresh-2","expires_in":10800,"scope":"user.metrics","token_type":"Bearer"}}"#,
+            )
+        }),
+    ]);
+    let garmin = FakeServer::start(vec![]);
+    let diauth = FakeServer::start(vec![]);
+
+    let run = run_sync(&dir, &[], &sync_env(&withings, &garmin, &diauth));
+
+    assert_eq!(run.code, 4, "stdout: {}", run.stdout);
+    assert!(
+        run.stderr.contains("still rejected"),
+        "stderr: {}",
+        run.stderr
+    );
+    assert!(
+        run.stderr.contains("re-run `auth withings`"),
+        "stderr: {}",
+        run.stderr
+    );
+    // Exactly one refresh and one retry; no further attempts.
+    assert_eq!(withings.requests_for("POST", "/measure").len(), 2);
+    assert_eq!(withings.requests_for("POST", "/v2/oauth2").len(), 1);
+}
+
+// ---------------------------------------------------------------------------
 // Garmin 401 -> refresh -> single retry
 // ---------------------------------------------------------------------------
 

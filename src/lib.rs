@@ -402,6 +402,63 @@ fn prompt_line(label: &str, retry: &str) -> Result<String, AppError> {
     Ok(trimmed)
 }
 
+/// Read the Withings measurement window. A token rejection (HTTP 401/403,
+/// or a body `status` of 401) triggers a refresh (persisted) followed by a
+/// single retry; a rejected refresh or a second rejection is an auth error
+/// (`EXIT_AUTH`) so the run aborts with "re-run `auth withings`" (ADR-0007).
+fn withings_read<F, T>(
+    client: &http::HttpClient,
+    tokens_path: &std::path::Path,
+    tokens: &mut config::Tokens,
+    client_id: &str,
+    client_secret: &str,
+    read: F,
+) -> Result<T, AppError>
+where
+    F: Fn(&http::HttpClient, &str) -> Result<T, withings::ReadFailure>,
+{
+    match read(client, &tokens.withings.access_token) {
+        Ok(value) => Ok(value),
+        Err(withings::ReadFailure::Unauthorized) => {
+            let refreshed = withings::refresh(
+                client,
+                client_id,
+                client_secret,
+                &tokens.withings.refresh_token,
+            )
+            .map_err(|error| {
+                AppError::new(
+                    EXIT_AUTH,
+                    format!(
+                        "Withings token refresh failed: {}; re-run `auth withings`",
+                        error.message
+                    ),
+                )
+            })?;
+            tokens.withings.access_token = refreshed.access_token;
+            if let Some(rotate) = refreshed.refresh_token {
+                tokens.withings.refresh_token = rotate;
+            }
+            tokens.withings.expires_at = Some(timefmt::now_epoch() as u64 + refreshed.expires_in);
+            config::write_tokens(tokens_path, tokens)?;
+
+            // The single retry with the fresh token. A second consecutive
+            // rejection means the token pair is dead: exit 4 (unlike Garmin,
+            // whose second 401 is a metric failure; ADR-0007 records the
+            // asymmetry).
+            match read(client, &tokens.withings.access_token) {
+                Ok(value) => Ok(value),
+                Err(withings::ReadFailure::Unauthorized) => Err(AppError::new(
+                    EXIT_AUTH,
+                    "token refresh succeeded but Withings still rejected the token; re-run `auth withings`",
+                )),
+                Err(withings::ReadFailure::Failed(error)) => Err(error),
+            }
+        }
+        Err(withings::ReadFailure::Failed(error)) => Err(error),
+    }
+}
+
 fn run_sync(cli_args: SyncArgs) -> Result<i32, AppError> {
     // Resolve the metric scope: `sync weight` / `sync bp` / `sync all`;
     // bare `sync` is `all` (ADR-0005). `args` becomes the chosen flag set.
@@ -525,13 +582,17 @@ fn run_sync(cli_args: SyncArgs) -> Result<i32, AppError> {
     };
 
     // Read the window from Withings once, scoped to the metric(s) in play
-    // (ADR-0005): a single-metric run never fetches the other metric.
-    let groups = withings::read_measures(
+    // (ADR-0005): a single-metric run never fetches the other metric. A
+    // mid-read auth rejection refreshes the token once and retries
+    // (ADR-0007).
+    let tokens_path = config::tokens_path(&dir);
+    let groups = withings_read(
         &client,
-        &tokens.withings.access_token,
-        since,
-        until,
-        scope.meastypes(),
+        &tokens_path,
+        &mut tokens,
+        &config.withings.client_id,
+        &config.withings.client_secret,
+        |c, t| withings::read_measures(c, t, since, until, scope.meastypes()),
     )?;
     let (weights, bps, skips) = transform::transform(groups);
 
@@ -606,7 +667,6 @@ fn run_sync(cli_args: SyncArgs) -> Result<i32, AppError> {
         .filter(|s| s.metric == transform::Metric::BloodPressure)
         .count();
 
-    let tokens_path = config::tokens_path(&dir);
     let mut garmin_state = GarminTokenState {
         access_token: tokens.garmin.access_token.clone(),
         refresh_token: tokens.garmin.refresh_token.clone(),

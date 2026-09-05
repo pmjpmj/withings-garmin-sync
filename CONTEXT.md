@@ -35,6 +35,12 @@ blood-pressure measurements from Withings and writes them to Garmin Connect.
   `auth withings` or `auth garmin`. Bare `auth` authenticates both (the
   first-run path). Each command replaces only its own section of
   `tokens.json`. See ADR-0006.
+- **auth recovery** — the `sync`-side policy when a service rejects a token
+  mid-run: refresh once with the stored refresh token, retry the failed
+  call once, then fail. Withings triggers: HTTP 401/403 or body
+  `status` 401 (Garmin: HTTP 401, already in place). A dead refresh token
+  or a second consecutive rejection exits 4 naming the service's `auth`
+  command. See ADR-0007.
 
 ## Decisions
 
@@ -42,4 +48,4 @@ blood-pressure measurements from Withings and writes them to Garmin Connect.
   pipeline for Linux and macOS. ADR-0003: aarch64 Linux release asset for
   Raspberry Pi 4. ADR-0004: static musl arm64 asset (Bullseye-compatible).
   ADR-0005: per-metric sync subcommands and cadences. ADR-0006: per-service
-  auth subcommands.
+  auth subcommands. ADR-0007: auth-failure recovery policy.

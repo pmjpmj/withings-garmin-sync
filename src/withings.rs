@@ -63,18 +63,38 @@ fn post_with_601_retry<T>(
     crate::http::retry(3, |(status, _)| is_rate_limited(*status), operation)
 }
 
+/// Failure reading from Withings: either the token was rejected (the
+/// caller refreshes once and retries, ADR-0007), or the read failed for
+/// another reason.
+#[derive(Debug)]
+pub enum ReadFailure {
+    Unauthorized,
+    Failed(AppError),
+}
+
+impl ReadFailure {
+    pub fn message(&self) -> &str {
+        match self {
+            ReadFailure::Unauthorized => "unauthorized (HTTP 401/403 or body status 401)",
+            ReadFailure::Failed(error) => &error.message,
+        }
+    }
+}
+
 /// Read the measurement window from Withings (`action=getmeas`), following
 /// the response's `more`/`offset` fields until there are no more pages.
 /// `meastypes` is the comma-separated set of meastype codes to request
 /// (ADR-0005 scopes it per metric). Withings `601` rate-limit responses are
-/// retried with backoff.
+/// retried with backoff; a token rejection (HTTP 401/403, or a JSON body
+/// `status` of 401) is reported as [`ReadFailure::Unauthorized`] so the
+/// caller can refresh and retry once (ADR-0007).
 pub fn read_measures(
     client: &HttpClient,
     access_token: &str,
     startdate: i64,
     enddate: i64,
     meastypes: &str,
-) -> Result<Vec<MeasureGroup>, AppError> {
+) -> Result<Vec<MeasureGroup>, ReadFailure> {
     let url = client.withings_url(MEASURE_PATH);
     let auth = format!("Bearer {access_token}");
 
@@ -100,25 +120,35 @@ pub fn read_measures(
                         format!("could not read measurements from Withings: {error}"),
                     )
                 })
-        })?;
+        })
+        .map_err(ReadFailure::Failed)?;
+        // Withings rejects a bad/expired access token with HTTP 401 (or
+        // 403); the JSON body may also carry `status: 401`. These are auth
+        // recoveries (ADR-0007): the caller refreshes once and retries.
+        if status == 401 || status == 403 {
+            return Err(ReadFailure::Unauthorized);
+        }
         if !(200..300).contains(&status) {
-            return Err(AppError::new(
+            return Err(ReadFailure::Failed(AppError::new(
                 crate::EXIT_METRIC_FAILURE,
                 format!("Withings measurements request returned HTTP {status}"),
-            ));
+            )));
         }
         let json: serde_json::Value = serde_json::from_str(&body).map_err(|error| {
-            AppError::new(
+            ReadFailure::Failed(AppError::new(
                 crate::EXIT_METRIC_FAILURE,
                 format!("Withings measurements response was invalid JSON: {error}"),
-            )
+            ))
         })?;
         let withings_status = json.get("status").and_then(|v| v.as_i64()).unwrap_or(-1);
+        if withings_status == 401 {
+            return Err(ReadFailure::Unauthorized);
+        }
         if withings_status != 0 {
-            return Err(AppError::new(
+            return Err(ReadFailure::Failed(AppError::new(
                 crate::EXIT_METRIC_FAILURE,
                 format!("Withings rejected the measurements request (status {withings_status})"),
-            ));
+            )));
         }
 
         let body = json.get("body").cloned().unwrap_or(serde_json::Value::Null);
@@ -160,10 +190,10 @@ pub fn read_measures(
         offset = next;
     }
 
-    Err(AppError::new(
+    Err(ReadFailure::Failed(AppError::new(
         crate::EXIT_METRIC_FAILURE,
         format!("Withings pagination did not terminate after {MAX_PAGES} pages"),
-    ))
+    )))
 }
 
 /// Generate a fresh random `state` for one authorization round-trip.
