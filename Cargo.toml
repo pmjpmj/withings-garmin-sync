@@ -1,6 +1,6 @@
 [package]
 name = "withings-garmin-sync"
-version = "0.1.6"
+version = "0.1.7"
 edition = "2021"
 description = "One-shot CLI that syncs Withings body weight and blood pressure into Garmin Connect"
 license = "MIT OR Apache-2.0"
