@@ -10,11 +10,13 @@ blood-pressure measurements from Withings and writes them to Garmin Connect.
   machine-updated floor (`sync.weight.since` / `sync.bp.since`), then the
   built-in rolling last 24 hours. See ADR-0001 and ADR-0008.
 - **sync floor** — a per-metric timestamp in `config.toml`
-  (`sync.weight.since`, `sync.bp.since`) marking the newest Withings
-  measurement already written to Garmin, stored as an RFC 3339 UTC
-  datetime (canonical `YYYY-MM-DDTHH:MM:SSZ`; see ADR-0009).
-  Machine-updated after each successful apply; the next run reads strictly
-  newer (`floor + 1`). Absent = the metric has no floor yet and bootstraps
+  (`sync.weight.since`, `sync.bp.since`) marking the Withings query
+  timestamp of that metric's last clean flag-free apply: everything at or
+  before it is considered handled (written or verified absent), stored as
+  an RFC 3339 UTC datetime (canonical `YYYY-MM-DDTHH:MM:SSZ`; see
+  ADR-0009). Machine-updated after each clean flag-free apply; the next run
+  reads strictly newer (`floor + 1`). Flag-driven applies never advance
+  floors (ADR-0010). Absent = the metric has no floor yet and bootstraps
   from the rolling window.
 - **rolling window** — a window anchored to "now minus a fixed duration"
   (24 hours by default), not to calendar boundaries; no timezone logic.
@@ -23,8 +25,9 @@ blood-pressure measurements from Withings and writes them to Garmin Connect.
   report, perform no writes. `--apply` turns writes on.
 - **apply** — the write mode (`sync --apply`, or metric-scoped like
   `sync bp --apply`): writes weight and blood-pressure to Garmin with
-  per-metric failure isolation, then advances each metric's floor to the
-  newest written Withings timestamp (ADR-0008).
+  per-metric failure isolation, then advances each clean metric's floor to
+  the Withings query timestamp, data or none (ADR-0010). Flag-driven
+  applies never advance floors.
 - **metric-scoped run** — a `sync` invocation restricted to one metric by
   subcommand: `sync weight` or `sync bp` (prose says "blood-pressure"; the
   subcommand is `bp`). `sync` and `sync all` sync both metrics (ADR-0005).
@@ -60,4 +63,5 @@ blood-pressure measurements from Withings and writes them to Garmin Connect.
   ADR-0005: per-metric sync subcommands and cadences. ADR-0006: per-service
   auth subcommands. ADR-0007: auth-failure recovery policy. ADR-0008:
   per-metric machine-updated sync floors (amends ADR-0001 and ADR-0005).
-  ADR-0009: human-readable sync floors (amends ADR-0008).
+  ADR-0009: human-readable sync floors (amends ADR-0008). ADR-0010:
+  read-checkpoint floors (amends ADR-0008).

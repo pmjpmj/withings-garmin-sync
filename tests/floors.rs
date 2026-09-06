@@ -1,11 +1,13 @@
-//! Black-box tests for ADR-0008/ADR-0009: per-metric machine-updated sync
-//! floors stored as human-readable RFC 3339 UTC datetimes.
+//! Black-box tests for ADR-0008/ADR-0009/ADR-0010: per-metric
+//! machine-updated sync floors stored as human-readable RFC 3339 UTC
+//! datetimes.
 //!
-//! `sync.weight.since` / `sync.bp.since` in config.toml mark the newest
-//! Withings measurement already written to Garmin. A successful apply
-//! advances each metric's floor independently; the next run reads strictly
-//! newer data (`startdate = floor + 1`) and the day-granular Garmin BP
-//! read-back no longer exists. Driven through the binary against fake
+//! `sync.weight.since` / `sync.bp.since` in config.toml are
+//! read-checkpoints: after a clean flag-free apply each included metric's
+//! floor advances to the Withings query timestamp (the local clock captured
+//! when the request fires), with a monotonic guard. Flag-driven applies
+//! never touch floors; the next run reads strictly newer data
+//! (`startdate = floor + 1`). Driven through the binary against fake
 //! Withings and Garmin servers, asserting on requests received, exit codes,
 //! output, and the files written.
 
@@ -127,7 +129,10 @@ fn floored_config(
     let mut text =
         format!("[withings]\nclient_id = \"{client_id}\"\nclient_secret = \"{client_secret}\"\n");
     if let Some(floor) = weight {
-        text.push_str(&format!("\n[sync.weight]\nsince = \"{}\"\n", floor_iso(floor)));
+        text.push_str(&format!(
+            "\n[sync.weight]\nsince = \"{}\"\n",
+            floor_iso(floor)
+        ));
     }
     if let Some(floor) = bp {
         text.push_str(&format!("\n[sync.bp]\nsince = \"{}\"\n", floor_iso(floor)));
@@ -184,7 +189,7 @@ fn startdate(read: &common::RecordedRequest) -> i64 {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn weight_apply_with_no_floor_bootstraps_and_writes_floor() {
+fn weight_apply_with_no_floor_bootstraps_and_writes_floor_at_the_query_timestamp() {
     let dir = TempDir::new();
     write_valid_config_and_tokens(dir.path());
     let withings = single_page_withings(vec![
@@ -207,7 +212,9 @@ fn weight_apply_with_no_floor_bootstraps_and_writes_floor() {
         startdate(&reads[0])
     );
 
-    // Both measurements written, and the floor lands on the newest one.
+    // Both measurements written, and the floor lands on the Withings query
+    // timestamp (the local clock at request time), not on the newest
+    // written measurement (ADR-0010).
     assert_eq!(
         garmin
             .requests_for("POST", "/weight-service/user-weight")
@@ -216,8 +223,16 @@ fn weight_apply_with_no_floor_bootstraps_and_writes_floor() {
         "{:#?}",
         garmin.requests()
     );
-    assert_eq!(floor(&dir, "weight"), Some(EPOCH + 120));
+    let ts = floor(&dir, "weight").expect("weight floor created");
+    assert!((n - ts).abs() < 120, "weight floor {ts} not ~now");
+    assert_ne!(ts, EPOCH + 120, "floor must not be the newest measurement");
     assert_eq!(floor(&dir, "bp"), None);
+    assert!(
+        run.stdout
+            .contains("weight: 2 written, 0 skipped, 0 failed — floor advanced to"),
+        "stdout: {}",
+        run.stdout
+    );
     // The rewritten config keeps the 0600 permissions (user story 23).
     assert_eq!(file_mode(&dir.path().join("config.toml")), 0o600);
 }
@@ -257,8 +272,18 @@ fn weight_apply_rerun_reads_strictly_newer_and_writes_nothing() {
         "stdout: {}",
         run.stdout
     );
-    // The floor is untouched.
-    assert_eq!(floor(&dir, "weight"), Some(EPOCH + 120));
+    // No data and no writes, but the clean flag-free apply still advances
+    // the floor to the Withings query timestamp: the empty window
+    // [floor + 1, query timestamp] is now verified (ADR-0010).
+    let n = now();
+    let ts = floor(&dir, "weight").unwrap();
+    assert!((n - ts).abs() < 120, "weight floor {ts} not ~now");
+    assert!(
+        run.stdout
+            .contains("weight: 0 written, 0 skipped, 0 failed — floor advanced to"),
+        "stdout: {}",
+        run.stdout
+    );
 }
 
 #[test]
@@ -294,18 +319,145 @@ fn dry_run_never_writes_config() {
 }
 
 #[test]
-fn empty_apply_never_writes_config() {
+fn empty_clean_apply_advances_floors_to_the_query_timestamp() {
     let dir = TempDir::new();
     write_valid_config_and_tokens(dir.path());
     let withings = single_page_withings(vec![]);
     let garmin = ok_garmin();
-    let before = config_text(&dir);
 
     let run = run_sync(&dir, &["--apply"], &withings, &garmin);
 
     assert_eq!(run.code, 0, "stderr: {}", run.stderr);
     assert!(garmin.requests().is_empty(), "{:#?}", garmin.requests());
-    assert_eq!(config_text(&dir), before);
+    // Both floorless metrics gain a floor at the Withings query timestamp
+    // (the local clock at request time), data or none (ADR-0010).
+    let n = now();
+    let weight_floor = floor(&dir, "weight").expect("weight floor created");
+    let bp_floor = floor(&dir, "bp").expect("bp floor created");
+    assert!(
+        (n - weight_floor).abs() < 120,
+        "weight floor {weight_floor} not ~now"
+    );
+    assert!((n - bp_floor).abs() < 120, "bp floor {bp_floor} not ~now");
+    // The report names each moved floor, per metric.
+    assert!(
+        run.stdout
+            .contains("weight: 0 written, 0 skipped, 0 failed — floor advanced to"),
+        "stdout: {}",
+        run.stdout
+    );
+    assert!(
+        run.stdout
+            .contains("blood-pressure: 0 written, 0 skipped, 0 failed — floor advanced to"),
+        "stdout: {}",
+        run.stdout
+    );
+    assert_eq!(file_mode(&dir.path().join("config.toml")), 0o600);
+}
+
+#[test]
+fn apply_with_every_reading_skipped_still_advances_the_floor() {
+    let dir = TempDir::new();
+    write_valid_config_and_tokens(dir.path());
+    // An out-of-range systolic skips the whole reading in the transform;
+    // a skip is not a failure, so the clean apply still advances (ADR-0010).
+    let withings = single_page_withings(vec![bp_group(300, 80, Some(72), EPOCH)]);
+    let garmin = ok_garmin();
+
+    let run = run_sync(&dir, &["bp", "--apply"], &withings, &garmin);
+
+    assert_eq!(run.code, 0, "stderr: {}", run.stderr);
+    assert!(garmin.requests().is_empty(), "{:#?}", garmin.requests());
+    assert!(
+        run.stdout
+            .contains("blood-pressure: 0 written, 1 skipped, 0 failed — floor advanced to"),
+        "stdout: {}",
+        run.stdout
+    );
+    let n = now();
+    let ts = floor(&dir, "bp").unwrap();
+    assert!((n - ts).abs() < 120, "bp floor {ts} not ~now");
+}
+
+#[test]
+fn inverted_window_reads_nothing_and_advances_nothing() {
+    // A floor ahead of the local clock makes an inverted window: the run
+    // sends no Withings request at all, so there is no query timestamp and
+    // the floor stays put (ADR-0010).
+    let dir = TempDir::new();
+    let future_floor = now() + 3600;
+    write_file(
+        &dir.path().join("config.toml"),
+        &floored_config(
+            Some(future_floor),
+            None,
+            "test-client-id",
+            "test-client-secret",
+        ),
+    );
+    write_file(&dir.path().join("tokens.json"), VALID_TOKENS);
+    let withings = single_page_withings(vec![]);
+    let garmin = ok_garmin();
+
+    let run = run_sync(&dir, &["weight", "--apply"], &withings, &garmin);
+
+    assert_eq!(run.code, 0, "stderr: {}", run.stderr);
+    assert!(withings.requests().is_empty(), "{:#?}", withings.requests());
+    assert_eq!(floor(&dir, "weight"), Some(future_floor));
+    assert!(
+        !run.stdout.contains("floor advanced"),
+        "stdout: {}",
+        run.stdout
+    );
+}
+
+#[test]
+fn monotonic_guard_never_moves_a_floor_backwards() {
+    // Weight's floor sits ahead of the local clock (hand-raised), while
+    // BP's is old: the combined read fires for BP, the query timestamp is
+    // older than the weight floor, and the guard leaves weight's floor put
+    // while BP advances (ADR-0010).
+    let dir = TempDir::new();
+    let future_floor = now() + 3600;
+    write_file(
+        &dir.path().join("config.toml"),
+        &floored_config(
+            Some(future_floor),
+            Some(EPOCH),
+            "test-client-id",
+            "test-client-secret",
+        ),
+    );
+    write_file(&dir.path().join("tokens.json"), VALID_TOKENS);
+    let withings = single_page_withings(vec![]);
+    let garmin = ok_garmin();
+
+    let run = run_sync(&dir, &["all", "--apply"], &withings, &garmin);
+
+    assert_eq!(run.code, 0, "stderr: {}", run.stderr);
+    assert_eq!(withings.requests_for("POST", "/measure").len(), 1);
+    // The guard never lowers a floor: weight keeps its hand-raised value.
+    assert_eq!(floor(&dir, "weight"), Some(future_floor));
+    let n = now();
+    let bp_floor = floor(&dir, "bp").unwrap();
+    assert!((n - bp_floor).abs() < 120, "bp floor {bp_floor} not ~now");
+    // Only BP's line carries the advancement note.
+    let weight_line = run
+        .stdout
+        .lines()
+        .find(|l| l.contains("weight: 0 written"))
+        .unwrap();
+    assert!(
+        !weight_line.contains("floor advanced"),
+        "stdout: {}",
+        run.stdout
+    );
+    assert!(
+        run.stdout
+            .contains("blood-pressure: 0 written, 0 skipped, 0 failed — floor advanced to"),
+        "stdout: {}",
+        run.stdout
+    );
 }
 
 #[test]
@@ -403,9 +555,17 @@ fn sync_all_filters_each_metric_to_its_own_floor_in_one_read() {
     let payload: serde_json::Value = serde_json::from_str(&bp_calls[0].body).unwrap();
     assert_eq!(payload["systolic"], 121);
 
-    // Both floors advanced independently to their newest written timestamp.
-    assert_eq!(floor(&dir, "weight"), Some(EPOCH + 60));
-    assert_eq!(floor(&dir, "bp"), Some(EPOCH + 90));
+    // Both floors advanced independently to the Withings query timestamp
+    // (the local clock at request time), not to the newest written
+    // measurement (ADR-0010).
+    let n = now();
+    let weight_floor = floor(&dir, "weight").unwrap();
+    let bp_floor = floor(&dir, "bp").unwrap();
+    assert!(
+        (n - weight_floor).abs() < 120,
+        "weight floor {weight_floor} not ~now"
+    );
+    assert!((n - bp_floor).abs() < 120, "bp floor {bp_floor} not ~now");
 }
 
 #[test]
@@ -443,9 +603,16 @@ fn sync_all_bp_bootstraps_while_weight_uses_its_floor() {
     assert_eq!(bp_calls.len(), 1, "{:#?}", garmin.requests());
     let payload: serde_json::Value = serde_json::from_str(&bp_calls[0].body).unwrap();
     assert_eq!(payload["systolic"], 120);
-    // The bootstrap write gives BP its first floor.
-    assert_eq!(floor(&dir, "weight"), Some(EPOCH + 60));
-    assert_eq!(floor(&dir, "bp"), Some(recent_bp));
+    // The bootstrap write gives BP its first floor; both floors land on the
+    // query timestamp (ADR-0010).
+    let n = now();
+    let weight_floor = floor(&dir, "weight").unwrap();
+    let bp_floor = floor(&dir, "bp").unwrap();
+    assert!(
+        (n - weight_floor).abs() < 120,
+        "weight floor {weight_floor} not ~now"
+    );
+    assert!((n - bp_floor).abs() < 120, "bp floor {bp_floor} not ~now");
 }
 
 #[test]
@@ -580,18 +747,24 @@ fn legacy_integer_floors_load_and_are_rewritten_canonically_by_the_next_apply() 
         startdate(&withings.requests_for("POST", "/measure")[0]),
         EPOCH + 1
     );
-    // Both floors advanced, and the rewrite emitted the canonical RFC 3339
-    // form (no integers anywhere).
-    assert_eq!(floor(&dir, "weight"), Some(EPOCH + 120));
-    assert_eq!(floor(&dir, "bp"), Some(EPOCH + 90));
+    // Both floors advanced to the Withings query timestamp, and the
+    // rewrite emitted the canonical RFC 3339 form (no integers anywhere).
+    let n = now();
+    let weight_floor = floor(&dir, "weight").unwrap();
+    let bp_floor = floor(&dir, "bp").unwrap();
+    assert!(
+        (n - weight_floor).abs() < 120,
+        "weight floor {weight_floor} not ~now"
+    );
+    assert!((n - bp_floor).abs() < 120, "bp floor {bp_floor} not ~now");
     let text = config_text(&dir);
     assert!(!text.contains("since = 1767"), "text: {text}");
     assert!(
-        text.contains("since = \"2026-01-02T08:32:00Z\""),
+        text.contains(&format!("since = \"{}\"", floor_iso(weight_floor))),
         "text: {text}"
     );
     assert!(
-        text.contains("since = \"2026-01-02T08:31:30Z\""),
+        text.contains(&format!("since = \"{}\"", floor_iso(bp_floor))),
         "text: {text}"
     );
 }
@@ -623,11 +796,13 @@ fn hand_written_date_floor_loads_as_midnight_utc_and_backfills() {
             .len(),
         1
     );
-    // The advance is written in canonical form.
-    assert_eq!(floor(&dir, "bp"), Some(EPOCH));
+    // The advance is written in canonical form at the query timestamp.
+    let n = now();
+    let bp_floor = floor(&dir, "bp").unwrap();
+    assert!((n - bp_floor).abs() < 120, "bp floor {bp_floor} not ~now");
     let text = config_text(&dir);
     assert!(
-        text.contains("since = \"2026-01-02T08:30:00Z\""),
+        text.contains(&format!("since = \"{}\"", floor_iso(bp_floor))),
         "text: {text}"
     );
 }
@@ -658,16 +833,23 @@ fn hand_edited_offset_and_fractional_floors_load_and_normalize() {
         startdate(&withings.requests_for("POST", "/measure")[0]),
         EPOCH + 1
     );
-    assert_eq!(floor(&dir, "weight"), Some(EPOCH + 120));
-    assert_eq!(floor(&dir, "bp"), Some(EPOCH + 90));
-    // The rewrite normalized both hand-edits to the canonical form.
+    // Both floors advanced to the query timestamp; the rewrite normalized
+    // both hand-edits to the canonical form.
+    let n = now();
+    let weight_floor = floor(&dir, "weight").unwrap();
+    let bp_floor = floor(&dir, "bp").unwrap();
+    assert!(
+        (n - weight_floor).abs() < 120,
+        "weight floor {weight_floor} not ~now"
+    );
+    assert!((n - bp_floor).abs() < 120, "bp floor {bp_floor} not ~now");
     let text = config_text(&dir);
     assert!(
-        text.contains("since = \"2026-01-02T08:32:00Z\""),
+        text.contains(&format!("since = \"{}\"", floor_iso(weight_floor))),
         "text: {text}"
     );
     assert!(
-        text.contains("since = \"2026-01-02T08:31:30Z\""),
+        text.contains(&format!("since = \"{}\"", floor_iso(bp_floor))),
         "text: {text}"
     );
     assert!(!text.contains("+02:00"), "text: {text}");
@@ -678,9 +860,9 @@ fn hand_edited_offset_and_fractional_floors_load_and_normalize() {
 fn malformed_floors_fail_config_load_with_exit_3() {
     for (metric, value) in [
         ("weight", "junk"),
-        ("weight", "2026-01-02T08:30:00"),      // naive: no timezone
-        ("bp", "2026-01-02 08:30:00Z"),         // space separator
-        ("bp", "2026-13-45"),                   // invalid date
+        ("weight", "2026-01-02T08:30:00"), // naive: no timezone
+        ("bp", "2026-01-02 08:30:00Z"),    // space separator
+        ("bp", "2026-13-45"),              // invalid date
     ] {
         let dir = TempDir::new();
         write_file(
@@ -820,11 +1002,14 @@ fn bp_apply_advances_bp_floor() {
             .len(),
         1
     );
-    assert_eq!(floor(&dir, "bp"), Some(EPOCH));
+    // The floor lands on the query timestamp, not the measurement (ADR-0010).
+    let n = now();
+    let bp_floor = floor(&dir, "bp").unwrap();
+    assert!((n - bp_floor).abs() < 120, "bp floor {bp_floor} not ~now");
     assert_eq!(floor(&dir, "weight"), None);
     assert!(
         run.stdout
-            .contains("blood-pressure: 1 written, 0 skipped, 0 failed"),
+            .contains("blood-pressure: 1 written, 0 skipped, 0 failed — floor advanced to"),
         "stdout: {}",
         run.stdout
     );
@@ -848,7 +1033,11 @@ fn bp_apply_rerun_writes_nothing() {
     assert_eq!(reads.len(), 1);
     assert_eq!(startdate(&reads[0]), EPOCH + 1);
     assert!(garmin.requests().is_empty(), "{:#?}", garmin.requests());
-    assert_eq!(floor(&dir, "bp"), Some(EPOCH));
+    // Nothing written, but the clean apply advances the floor to the query
+    // timestamp (ADR-0010).
+    let n = now();
+    let bp_floor = floor(&dir, "bp").unwrap();
+    assert!((n - bp_floor).abs() < 120, "bp floor {bp_floor} not ~now");
 }
 
 #[test]
@@ -873,7 +1062,10 @@ fn two_same_day_bp_readings_both_upload() {
         "{:#?}",
         garmin.requests()
     );
-    assert_eq!(floor(&dir, "bp"), Some(EPOCH + 4 * 3600));
+    // The floor lands on the query timestamp, not the newest reading.
+    let n = now();
+    let bp_floor = floor(&dir, "bp").unwrap();
+    assert!((n - bp_floor).abs() < 120, "bp floor {bp_floor} not ~now");
     assert!(
         run.stdout
             .contains("blood-pressure: 2 written, 0 skipped, 0 failed"),
@@ -935,15 +1127,35 @@ fn sync_all_advances_floors_independently_on_partial_failure() {
     let run = run_sync(&dir, &["all", "--apply"], &withings, &garmin);
 
     assert_eq!(run.code, 1, "stdout: {}", run.stdout);
-    // BP went through; its floor advances. The failed weight floor stays.
+    // BP went through; its floor advances to the query timestamp. The
+    // failed weight floor stays put.
     assert_eq!(
         garmin
             .requests_for("POST", "/bloodpressure-service/bloodpressure")
             .len(),
         1
     );
-    assert_eq!(floor(&dir, "bp"), Some(EPOCH + 90));
+    let n = now();
+    let bp_floor = floor(&dir, "bp").unwrap();
+    assert!((n - bp_floor).abs() < 120, "bp floor {bp_floor} not ~now");
     assert_eq!(floor(&dir, "weight"), Some(EPOCH));
+    // Only BP's line carries the advancement note.
+    let weight_line = run
+        .stdout
+        .lines()
+        .find(|l| l.contains("weight: 0 written"))
+        .unwrap();
+    assert!(
+        !weight_line.contains("floor advanced"),
+        "stdout: {}",
+        run.stdout
+    );
+    assert!(
+        run.stdout
+            .contains("blood-pressure: 1 written, 0 skipped, 0 failed — floor advanced to"),
+        "stdout: {}",
+        run.stdout
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -951,7 +1163,7 @@ fn sync_all_advances_floors_independently_on_partial_failure() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn since_flag_bypasses_floors_and_apply_advances_them() {
+fn since_flag_bypasses_floors_and_apply_leaves_them_untouched() {
     let dir = TempDir::new();
     write_file(
         &dir.path().join("config.toml"),
@@ -969,6 +1181,7 @@ fn since_flag_bypasses_floors_and_apply_advances_them() {
         bp_group(120, 80, Some(72), EPOCH + 1),
     ]);
     let garmin = ok_garmin();
+    let before = config_text(&dir);
 
     let run = run_sync(
         &dir,
@@ -994,9 +1207,51 @@ fn since_flag_bypasses_floors_and_apply_advances_them() {
             .len(),
         1
     );
-    // A successful flag-driven apply still advances the floors.
+    // A flag-driven apply never advances floors: the config is
+    // byte-identical afterwards (ADR-0010).
+    assert_eq!(floor(&dir, "weight"), Some(EPOCH + 100));
+    assert_eq!(floor(&dir, "bp"), Some(EPOCH + 100));
+    assert_eq!(config_text(&dir), before);
+    assert!(
+        !run.stdout.contains("floor advanced"),
+        "stdout: {}",
+        run.stdout
+    );
+}
+
+#[test]
+fn until_flag_alone_leaves_floors_byte_identical() {
+    let dir = TempDir::new();
+    write_file(
+        &dir.path().join("config.toml"),
+        &floored_config(
+            Some(EPOCH),
+            Some(EPOCH + 1),
+            "test-client-id",
+            "test-client-secret",
+        ),
+    );
+    write_file(&dir.path().join("tokens.json"), VALID_TOKENS);
+    let withings = single_page_withings(vec![]);
+    let garmin = ok_garmin();
+    let before = config_text(&dir);
+
+    let run = run_sync(
+        &dir,
+        &["all", "--apply", "--until", "2026-02-01"],
+        &withings,
+        &garmin,
+    );
+
+    assert_eq!(run.code, 0, "stderr: {}", run.stderr);
+    assert_eq!(config_text(&dir), before);
     assert_eq!(floor(&dir, "weight"), Some(EPOCH));
     assert_eq!(floor(&dir, "bp"), Some(EPOCH + 1));
+    assert!(
+        !run.stdout.contains("floor advanced"),
+        "stdout: {}",
+        run.stdout
+    );
 }
 
 #[test]
@@ -1015,10 +1270,17 @@ fn hand_lowered_floor_resends_older_bp_reading() {
     let withings = single_page_withings(vec![bp_group(120, 80, Some(72), EPOCH)]);
     let garmin = ok_garmin();
 
-    // Floor ahead of the data: nothing to write.
+    // Floor ahead of the data: nothing to write, but the clean apply still
+    // advances the floor to the query timestamp (ADR-0010).
     let first = run_sync(&dir, &["bp", "--apply"], &withings, &garmin);
     assert_eq!(first.code, 0, "stderr: {}", first.stderr);
     assert!(garmin.requests().is_empty(), "{:#?}", garmin.requests());
+    let n = now();
+    let first_floor = floor(&dir, "bp").unwrap();
+    assert!(
+        (n - first_floor).abs() < 120,
+        "bp floor {first_floor} not ~now"
+    );
 
     // Hand-lower the floor below the measurement: the next apply re-sends it
     // (for BP this duplicates the entry on Garmin — the documented lever).
@@ -1041,7 +1303,12 @@ fn hand_lowered_floor_resends_older_bp_reading() {
         "{:#?}",
         garmin.requests()
     );
-    assert_eq!(floor(&dir, "bp"), Some(EPOCH));
+    let n = now();
+    let second_floor = floor(&dir, "bp").unwrap();
+    assert!(
+        (n - second_floor).abs() < 120,
+        "bp floor {second_floor} not ~now"
+    );
 }
 
 #[test]
@@ -1064,7 +1331,11 @@ fn measurement_at_exactly_the_floor_is_not_rewritten() {
         EPOCH + 1
     );
     assert!(garmin.requests().is_empty(), "{:#?}", garmin.requests());
-    assert_eq!(floor(&dir, "bp"), Some(EPOCH));
+    // The measurement at the floor is not rewritten, but the clean apply
+    // still advances the floor to the query timestamp (ADR-0010).
+    let n = now();
+    let ts = floor(&dir, "bp").unwrap();
+    assert!((n - ts).abs() < 120, "bp floor {ts} not ~now");
 }
 
 #[test]
@@ -1122,5 +1393,12 @@ fn config_write_failure_warns_but_run_outcome_unchanged() {
         run.stderr.contains("warning") && run.stderr.contains("floor"),
         "stderr: {}",
         run.stderr
+    );
+    // The failed config write leaves the floors unadvanced on disk, so the
+    // report does not claim an advancement it could not persist.
+    assert!(
+        !run.stdout.contains("floor advanced"),
+        "stdout: {}",
+        run.stdout
     );
 }

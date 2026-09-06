@@ -595,18 +595,22 @@ fn run_sync(cli_args: SyncArgs) -> Result<i32, AppError> {
     };
     // A bound newer than the upper bound (e.g. a floor slightly in the
     // future after clock skew) reads nothing rather than sending Withings
-    // an inverted window.
+    // an inverted window; with no request fired there is no query
+    // timestamp, so nothing can advance (ADR-0010).
     let mut groups = Vec::new();
+    let mut query_ts: Option<i64> = None;
     let tokens_path = config::tokens_path(&dir);
     if read_start <= until {
-        groups = withings_read(
+        let read = withings_read(
             &client,
             &tokens_path,
             &mut tokens,
             &config.withings.client_id,
             &config.withings.client_secret,
-            |c, t| withings::read_measures(c, t, read_start, until, scope.meastypes()),
+            |c, t| withings::read_measures(c, t, read_start, until_flag, scope.meastypes()),
         )?;
+        groups = read.groups;
+        query_ts = Some(read.query_ts);
     }
     let (weights, bps, skips) = transform::transform(groups);
 
@@ -725,10 +729,6 @@ fn run_sync(cli_args: SyncArgs) -> Result<i32, AppError> {
 
     let mut weight_failed = 0usize;
     let mut bp_failed = 0usize;
-    // The newest Withings timestamp among each metric's successfully written
-    // measurements; the floors advance to these after a clean metric.
-    let mut weight_newest: Option<i64> = None;
-    let mut bp_newest: Option<i64> = None;
     if include_weight {
         for weight in &weights {
             let payload = garmin::weight_payload(
@@ -744,10 +744,7 @@ fn run_sync(cli_args: SyncArgs) -> Result<i32, AppError> {
                 &mut tokens,
                 garmin::write_weight,
             ) {
-                Ok(()) => {
-                    weight_newest =
-                        Some(weight_newest.map_or(weight.epoch, |m| m.max(weight.epoch)));
-                }
+                Ok(()) => {}
                 Err(error) if error.code == EXIT_AUTH => return Err(error),
                 Err(error) => {
                     eprintln!("error: weight write failed: {}", error.message);
@@ -773,9 +770,7 @@ fn run_sync(cli_args: SyncArgs) -> Result<i32, AppError> {
                 &mut tokens,
                 garmin::write_blood_pressure,
             ) {
-                Ok(()) => {
-                    bp_newest = Some(bp_newest.map_or(bp.epoch, |m| m.max(bp.epoch)));
-                }
+                Ok(()) => {}
                 Err(error) if error.code == EXIT_AUTH => return Err(error),
                 Err(error) => {
                     eprintln!("error: blood-pressure write failed: {}", error.message);
@@ -789,44 +784,73 @@ fn run_sync(cli_args: SyncArgs) -> Result<i32, AppError> {
     let bp_written = bps.len().saturating_sub(bp_failed);
     let any_failed = weight_failed > 0 || bp_failed > 0;
 
-    // Floor advancement (ADR-0008): a metric's floor moves to the newest
-    // written timestamp only when every one of that metric's writes
-    // succeeded; empty runs and failed metrics leave the floor untouched.
-    // The whole config is rewritten through the existing 0600 write path. A
-    // config-write failure after successful Garmin writes warns but does not
-    // change the run's reported outcome.
-    let mut floors_changed = false;
-    if include_weight && weight_failed == 0 {
-        if let Some(epoch) = weight_newest {
-            config.sync.weight.since = Some(epoch);
-            floors_changed = true;
+    // Floor advancement (ADR-0010, amending ADR-0008): on a clean flag-free
+    // apply, each included metric's floor advances to the Withings query
+    // timestamp — the enddate actually sent, captured at the moment the
+    // request fired — with a monotonic guard (never lower than the current
+    // floor). Failed writes still block that metric (per-metric
+    // all-or-nothing); skips are not failures. A floorless metric gains a
+    // floor on its first clean flag-free apply. Flag-driven applies and
+    // inverted windows (no request fired) advance nothing. The whole config
+    // is rewritten through the existing 0600 write path; a config-write
+    // failure after the apply warns and leaves the floors unadvanced
+    // without changing the run's reported outcome.
+    let flag_free = since_flag.is_none() && until_flag.is_none();
+    let mut floors_moved: Vec<(&'static str, i64)> = Vec::new();
+    if flag_free {
+        if let Some(query_ts) = query_ts {
+            if include_weight && weight_failed == 0 {
+                let next = config
+                    .sync
+                    .weight
+                    .since
+                    .map_or(query_ts, |f| f.max(query_ts));
+                if config.sync.weight.since != Some(next) {
+                    config.sync.weight.since = Some(next);
+                    floors_moved.push(("weight", next));
+                }
+            }
+            if include_bp && bp_failed == 0 {
+                let next = config.sync.bp.since.map_or(query_ts, |f| f.max(query_ts));
+                if config.sync.bp.since != Some(next) {
+                    config.sync.bp.since = Some(next);
+                    floors_moved.push(("bp", next));
+                }
+            }
         }
     }
-    if include_bp && bp_failed == 0 {
-        if let Some(epoch) = bp_newest {
-            config.sync.bp.since = Some(epoch);
-            floors_changed = true;
-        }
-    }
-    if floors_changed {
+    if !floors_moved.is_empty() {
         if let Err(error) = config::write_config(&config::config_path(&dir), &config) {
             eprintln!(
-                "warning: could not write config after Garmin writes succeeded: {}; \
-                 the sync floors did not advance and the next run may re-send measurements",
+                "warning: could not write config after the apply: {}; \
+                 the sync floors did not advance and the next run may re-read this window",
                 error.message
             );
+            floors_moved.clear();
         }
     }
+    // The report notes an advancement per metric, only when that metric's
+    // floor actually moved and was persisted (ADR-0010).
+    let weight_note = floors_moved
+        .iter()
+        .find(|(name, _)| *name == "weight")
+        .map(|(_, ts)| format!(" — floor advanced to {}", timefmt::format_floor(*ts)));
+    let bp_note = floors_moved
+        .iter()
+        .find(|(name, _)| *name == "bp")
+        .map(|(_, ts)| format!(" — floor advanced to {}", timefmt::format_floor(*ts)));
 
     // Reporting is metric-aware (ADR-0005): a single-metric run reports only
     // its own metric and names it in the summary. Exit codes are unchanged.
     match scope {
         MetricScope::All => {
             println!(
-                "apply ({window_label}): weight: {weight_written} written, {weight_skips} skipped, {weight_failed} failed"
+                "apply ({window_label}): weight: {weight_written} written, {weight_skips} skipped, {weight_failed} failed{}",
+                weight_note.as_deref().unwrap_or("")
             );
             println!(
-                "apply ({window_label}): blood-pressure: {bp_written} written, {bp_skips} skipped, {bp_failed} failed"
+                "apply ({window_label}): blood-pressure: {bp_written} written, {bp_skips} skipped, {bp_failed} failed{}",
+                bp_note.as_deref().unwrap_or("")
             );
             if any_failed {
                 println!("summary: 1 metric(s) failed");
@@ -838,7 +862,8 @@ fn run_sync(cli_args: SyncArgs) -> Result<i32, AppError> {
         }
         MetricScope::Weight => {
             println!(
-                "apply ({window_label}): weight: {weight_written} written, {weight_skips} skipped, {weight_failed} failed"
+                "apply ({window_label}): weight: {weight_written} written, {weight_skips} skipped, {weight_failed} failed{}",
+                weight_note.as_deref().unwrap_or("")
             );
             if any_failed {
                 println!("summary: weight failed");
@@ -850,7 +875,8 @@ fn run_sync(cli_args: SyncArgs) -> Result<i32, AppError> {
         }
         MetricScope::Bp => {
             println!(
-                "apply ({window_label}): blood-pressure: {bp_written} written, {bp_skips} skipped, {bp_failed} failed"
+                "apply ({window_label}): blood-pressure: {bp_written} written, {bp_skips} skipped, {bp_failed} failed{}",
+                bp_note.as_deref().unwrap_or("")
             );
             if any_failed {
                 println!("summary: blood-pressure failed");
