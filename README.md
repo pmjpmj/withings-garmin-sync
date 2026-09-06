@@ -152,7 +152,11 @@ timestamp whether the metric wrote data, wrote nothing, or had every
 reading skipped; applies with `--since`/`--until` never touch floors. The
 next run reads strictly newer (`floor + 1`). A metric without a floor
 bootstraps from the built-in rolling window (the last 24 hours), exactly
-like a fresh install.
+like a fresh install. A floor that sits ahead of the machine's clock
+(hand-raised, or a typo while hand-adjusting) wedges that metric: every run
+reports 0 written and exits clean while the floor never advances. The CLI
+warns on stderr when an included metric's floor is in the future; the
+remedy is hand-lowering the floor in `config.toml`.
 
 **Migration note:** the old shared `sync.since` key (a `YYYY-MM-DD` date) is
 removed. Existing configs keep loading — the key is simply ignored — and the

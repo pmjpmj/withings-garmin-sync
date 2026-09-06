@@ -409,6 +409,16 @@ fn inverted_window_reads_nothing_and_advances_nothing() {
         "stdout: {}",
         run.stdout
     );
+    // A future floor wedges the metric: the run must say so up front
+    // instead of silently exiting clean.
+    assert!(
+        run.stderr.contains(&format!(
+            "warning: weight floor {} is in the future",
+            floor_iso(future_floor)
+        )),
+        "stderr: {}",
+        run.stderr
+    );
 }
 
 #[test]
@@ -441,6 +451,16 @@ fn monotonic_guard_never_moves_a_floor_backwards() {
     let n = now();
     let bp_floor = floor(&dir, "bp").unwrap();
     assert!((n - bp_floor).abs() < 120, "bp floor {bp_floor} not ~now");
+    // The future weight floor is warned about; BP's healthy floor is not.
+    assert!(
+        run.stderr.contains(&format!(
+            "warning: weight floor {} is in the future",
+            floor_iso(future_floor)
+        )),
+        "stderr: {}",
+        run.stderr
+    );
+    assert!(!run.stderr.contains("bp floor"), "stderr: {}", run.stderr);
     // Only BP's line carries the advancement note.
     let weight_line = run
         .stdout
@@ -457,6 +477,142 @@ fn monotonic_guard_never_moves_a_floor_backwards() {
             .contains("blood-pressure: 0 written, 0 skipped, 0 failed — floor advanced to"),
         "stdout: {}",
         run.stdout
+    );
+}
+
+#[test]
+fn sync_all_warns_when_a_floor_is_in_the_future() {
+    // The operator story behind the warning: a hand-raised (or typo'd) bp
+    // floor wedges blood-pressure reads silently — sync all reports
+    // 0 written / 0 skipped / 0 failed, exits clean, and never advances the
+    // floor. The run must say so up front.
+    let dir = TempDir::new();
+    let future_bp = now() + 2 * 365 * 86400;
+    write_file(
+        &dir.path().join("config.toml"),
+        &floored_config(
+            Some(EPOCH),
+            Some(future_bp),
+            "test-client-id",
+            "test-client-secret",
+        ),
+    );
+    write_file(&dir.path().join("tokens.json"), VALID_TOKENS);
+    let withings = single_page_withings(vec![]);
+    let garmin = ok_garmin();
+
+    let run = run_sync(&dir, &["all", "--apply"], &withings, &garmin);
+
+    assert_eq!(run.code, 0, "stderr: {}", run.stderr);
+    assert!(
+        run.stderr.contains(&format!(
+            "warning: bp floor {} is in the future",
+            floor_iso(future_bp)
+        )),
+        "stderr: {}",
+        run.stderr
+    );
+    assert!(
+        !run.stderr.contains("weight floor"),
+        "stderr: {}",
+        run.stderr
+    );
+    // The wedge is real: weight advances, BP's floor stays put and its
+    // report line carries no advancement note.
+    let n = now();
+    let weight_floor = floor(&dir, "weight").unwrap();
+    assert!(
+        (n - weight_floor).abs() < 120,
+        "weight floor {weight_floor} not ~now"
+    );
+    assert_eq!(floor(&dir, "bp"), Some(future_bp));
+    let bp_line = run
+        .stdout
+        .lines()
+        .find(|l| l.contains("blood-pressure: 0 written"))
+        .unwrap();
+    assert!(
+        !bp_line.contains("floor advanced"),
+        "stdout: {}",
+        run.stdout
+    );
+}
+
+#[test]
+fn dry_run_warns_about_a_future_floor_without_writing_anything() {
+    let dir = TempDir::new();
+    let future_bp = now() + 2 * 365 * 86400;
+    write_file(
+        &dir.path().join("config.toml"),
+        &floored_config(
+            Some(EPOCH),
+            Some(future_bp),
+            "test-client-id",
+            "test-client-secret",
+        ),
+    );
+    write_file(&dir.path().join("tokens.json"), VALID_TOKENS);
+    let before = config_text(&dir);
+    let withings = single_page_withings(vec![]);
+    let garmin = ok_garmin();
+
+    let run = run_sync(&dir, &[], &withings, &garmin);
+
+    assert_eq!(run.code, 0, "stderr: {}", run.stderr);
+    assert!(
+        run.stderr.contains(&format!(
+            "warning: bp floor {} is in the future",
+            floor_iso(future_bp)
+        )),
+        "stderr: {}",
+        run.stderr
+    );
+    // A dry run stays byte-identical even when it warns.
+    assert_eq!(config_text(&dir), before);
+}
+
+#[test]
+fn future_floor_warning_is_scoped_to_the_metrics_in_play() {
+    // `sync bp` must not warn about a future weight floor, and vice versa:
+    // the warning follows the same per-metric scoping as the report
+    // (ADR-0005).
+    let dir = TempDir::new();
+    let future_weight = now() + 2 * 365 * 86400;
+    write_file(
+        &dir.path().join("config.toml"),
+        &floored_config(
+            Some(future_weight),
+            Some(EPOCH),
+            "test-client-id",
+            "test-client-secret",
+        ),
+    );
+    write_file(&dir.path().join("tokens.json"), VALID_TOKENS);
+    let withings = single_page_withings(vec![]);
+    let garmin = ok_garmin();
+
+    let bp_run = run_sync(&dir, &["bp", "--apply"], &withings, &garmin);
+    assert_eq!(bp_run.code, 0, "stderr: {}", bp_run.stderr);
+    assert!(
+        !bp_run.stderr.contains("weight floor"),
+        "stderr: {}",
+        bp_run.stderr
+    );
+
+    let weight_run = run_sync(&dir, &["weight", "--apply"], &withings, &garmin);
+    assert_eq!(weight_run.code, 0, "stderr: {}", weight_run.stderr);
+    assert!(
+        weight_run.stderr.contains(&format!(
+            "warning: weight floor {} is in the future",
+            floor_iso(future_weight)
+        )),
+        "stderr: {}",
+        weight_run.stderr
+    );
+    assert!(
+        !weight_run.stderr.contains("bp floor"),
+        "stderr: {}",
+        weight_run.stderr
     );
 }
 

@@ -551,6 +551,36 @@ fn run_sync(cli_args: SyncArgs) -> Result<i32, AppError> {
         }
     }
 
+    // A stored floor ahead of the local clock never advances: the monotonic
+    // guard (ADR-0010) refuses to lower it, so that metric's strictly-newer
+    // reads see nothing forever and every run reports 0 written / 0 skipped
+    // / 0 failed while exiting clean. The only remedy is a hand-lowered
+    // floor, so warn up front — scoped to the metrics this run touches
+    // (ADR-0005) — instead of failing silently.
+    for (name, key, floor, included) in [
+        (
+            "weight",
+            "sync.weight.since",
+            config.sync.weight.since,
+            include_weight,
+        ),
+        ("bp", "sync.bp.since", config.sync.bp.since, include_bp),
+    ] {
+        if !included {
+            continue;
+        }
+        let Some(floor) = floor else {
+            continue;
+        };
+        if floor > now {
+            eprintln!(
+                "warning: {name} floor {} is in the future; sync will not advance it — \
+                 hand-lower {key} in config.toml to resume {name} sync",
+                timefmt::format_floor(floor)
+            );
+        }
+    }
+
     let weight_bound = MetricBound::resolve(config.sync.weight.since, since_flag, until_flag, now);
     let bp_bound = MetricBound::resolve(config.sync.bp.since, since_flag, until_flag, now);
 
