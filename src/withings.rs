@@ -81,22 +81,42 @@ impl ReadFailure {
     }
 }
 
+/// One measurement-window read from Withings: the measure groups plus the
+/// Withings query timestamp (ADR-0010). Clean flag-free applies advance
+/// each metric's sync floor to this timestamp.
+#[derive(Debug)]
+pub struct MeasuresRead {
+    pub groups: Vec<MeasureGroup>,
+    /// The local clock captured at the moment the first request fires — the
+    /// `enddate` actually sent, before pagination (ADR-0010).
+    pub query_ts: i64,
+}
+
 /// Read the measurement window from Withings (`action=getmeas`), following
 /// the response's `more`/`offset` fields until there are no more pages.
 /// `meastypes` is the comma-separated set of meastype codes to request
-/// (ADR-0005 scopes it per metric). Withings `601` rate-limit responses are
-/// retried with backoff; a token rejection (HTTP 401/403, or a JSON body
-/// `status` of 401) is reported as [`ReadFailure::Unauthorized`] so the
-/// caller can refresh and retry once (ADR-0007).
+/// (ADR-0005 scopes it per metric). `enddate` of `None` means "now": the
+/// clock is captured at the moment the first request fires, so the query
+/// timestamp never predates the request (ADR-0010). Withings `601`
+/// rate-limit responses are retried with backoff; a token rejection (HTTP
+/// 401/403, or a JSON body `status` of 401) is reported as
+/// [`ReadFailure::Unauthorized`] so the caller can refresh and retry once
+/// (ADR-0007).
 pub fn read_measures(
     client: &HttpClient,
     access_token: &str,
     startdate: i64,
-    enddate: i64,
+    enddate: Option<i64>,
     meastypes: &str,
-) -> Result<Vec<MeasureGroup>, ReadFailure> {
+) -> Result<MeasuresRead, ReadFailure> {
     let url = client.withings_url(MEASURE_PATH);
     let auth = format!("Bearer {access_token}");
+
+    // The Withings query timestamp (ADR-0010): the local clock captured at
+    // the moment the request fires — the `enddate` actually sent, before
+    // pagination. A flag-driven read passes its explicit enddate; a
+    // flag-free read captures now here, not earlier in the run.
+    let query_ts = enddate.unwrap_or_else(crate::timefmt::now_epoch);
 
     let mut groups: Vec<MeasureGroup> = Vec::new();
     let mut offset: u64 = 0;
@@ -105,7 +125,7 @@ pub fn read_measures(
             ("action".to_string(), "getmeas".to_string()),
             ("meastypes".to_string(), meastypes.to_string()),
             ("startdate".to_string(), startdate.to_string()),
-            ("enddate".to_string(), enddate.to_string()),
+            ("enddate".to_string(), query_ts.to_string()),
             ("offset".to_string(), offset.to_string()),
         ];
 
@@ -179,13 +199,13 @@ pub fn read_measures(
 
         let more = body.get("more").and_then(|v| v.as_u64()).unwrap_or(0);
         if more == 0 {
-            return Ok(groups);
+            return Ok(MeasuresRead { groups, query_ts });
         }
         let next = body.get("offset").and_then(|v| v.as_u64()).unwrap_or(0);
         if next == offset {
             // The server says "more" but gave no new offset; stop rather
             // than loop.
-            return Ok(groups);
+            return Ok(MeasuresRead { groups, query_ts });
         }
         offset = next;
     }

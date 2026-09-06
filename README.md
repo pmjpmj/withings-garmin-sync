@@ -7,8 +7,9 @@ Connect, preserving each measurement's original timestamp.
 Garmin has no public write API for these metrics, so the CLI writes through
 Garmin's undocumented internal JSON endpoints (no FIT encoding). After a
 one-time interactive `auth` step, every subsequent `sync` is non-interactive
-and safe to re-run: weight writes deduplicate by timestamp, and blood-pressure
-writes are guarded by a read-back that skips any day Garmin already has.
+and safe to re-run: each metric remembers its progress as an ISO-8601 floor
+in `config.toml` (`sync.weight.since` / `sync.bp.since`), and the next run
+reads only measurements strictly newer than the floor.
 
 Key properties:
 
@@ -125,7 +126,7 @@ Files are written under `~/.config/withings-garmin-sync/` (override with
 
 | File | Contents | Permissions |
 |---|---|---|
-| `config.toml` | Static settings: Withings OAuth client id/secret, optional sync defaults | `0600` |
+| `config.toml` | Static settings: Withings OAuth client id/secret, per-metric sync floors (machine-updated) | `0600` |
 | `tokens.json` | Secrets: Withings + Garmin access/refresh tokens | `0600` |
 
 Example `config.toml`:
@@ -135,11 +136,30 @@ Example `config.toml`:
 client_id = "your-client-id"
 client_secret = "your-client-secret"
 
-[sync]
-# Optional: default lower bound for the sync window when no --since/--until
-# flags are given (omit for the built-in rolling 24-hour window).
-since = "2026-01-01"
+# Optional per-metric sync floors (RFC 3339 UTC datetimes). The CLI rewrites
+# these after every clean flag-free apply; you normally never edit them by hand.
+[sync.weight]
+since = "2026-01-02T08:30:00Z"   # everything at or before this is handled
+
+[sync.bp]
+since = "2026-01-02T08:30:00Z"
 ```
+
+Each floor marks the Withings query timestamp of that metric's last clean
+flag-free apply (ADR-0010): everything at or before it is handled — written
+or verified absent. A clean `sync --apply` advances the floor to the query
+timestamp whether the metric wrote data, wrote nothing, or had every
+reading skipped; applies with `--since`/`--until` never touch floors. The
+next run reads strictly newer (`floor + 1`). A metric without a floor
+bootstraps from the built-in rolling window (the last 24 hours), exactly
+like a fresh install.
+
+**Migration note:** the old shared `sync.since` key (a `YYYY-MM-DD` date) is
+removed. Existing configs keep loading — the key is simply ignored — and the
+first apply after upgrading bootstraps from the rolling window as if the
+floors were absent. Configs carrying the pre-ADR-0009 integer-epoch floors
+also keep loading with identical behavior; the next clean flag-free apply
+(or an `auth` rewrite) stores them in the canonical ISO form.
 
 ## Usage
 
@@ -155,7 +175,8 @@ withings-garmin-sync sync weight --apply   # weight only
 withings-garmin-sync sync bp --apply       # blood-pressure only
 withings-garmin-sync sync all --apply      # both (same as bare `sync`)
 
-# Bound the window (ISO YYYY-MM-DD). Defaults: last 24 hours.
+# Bound the window (ISO YYYY-MM-DD). Default: the per-metric floors, or the
+# rolling last 24 hours for a metric with no floor yet.
 withings-garmin-sync sync --since 2026-01-01 --until 2026-06-01
 withings-garmin-sync sync --since 2026-01-01   # since ... until now
 withings-garmin-sync sync --until 2026-01-01   # from the beginning until ...
@@ -163,6 +184,33 @@ withings-garmin-sync sync --until 2026-01-01   # from the beginning until ...
 # Use an alternate config directory and/or log every request/response.
 withings-garmin-sync --config-dir /tmp/wgs-test sync --verbose
 ```
+
+### Backfills and the BP no-dedup caveat
+
+Normal scheduled runs never re-send anything: each metric reads only
+measurements strictly newer than its floor. Two ways to force an older
+window exist, and both can **duplicate blood-pressure entries** when they
+re-write an already-synced BP measurement — Garmin's BP endpoint does not
+deduplicate writes (weight is unaffected: Garmin dedups weight writes by
+timestamp).
+
+- `--since 2026-01-01` (optionally with `--until`) bypasses the floors for
+  one run and re-reads from the flag date. Flag-driven applies leave the
+  floors untouched. A backfill of data older than the floor has no knock-on
+  effect: the floor stays put and the next scheduled run skips that data as
+  before. A backfill that reaches data *newer* than the floor is different:
+  the next scheduled run re-sends that newer data, duplicating BP (no Garmin
+  dedup). The remedy is a hand-adjusted floor in `config.toml` — set the
+  floor to the newest backfilled timestamp so the next run skips it.
+- Hand-lowering a floor in `config.toml` (e.g. `sync.bp.since` → an earlier
+  datetime like `"2026-01-01T00:00:00Z"`, or a plain `YYYY-MM-DD` date,
+  which means midnight UTC) makes every subsequent apply re-send the older
+  measurements. Prefer the flags for one-off backfills.
+
+One-second exclusivity: a run reads `floor + 1` onward, so a second,
+different measurement sharing the exact second of the stored floor is
+skipped. For BP that is effectively the same reading; for weight,
+same-second weigh-ins do not occur in practice.
 
 ### Exit codes
 
@@ -177,23 +225,25 @@ withings-garmin-sync --config-dir /tmp/wgs-test sync --verbose
 ### Scheduling
 
 `sync --apply` is non-interactive after `auth`, so it runs fine from cron or a
-systemd timer. The metrics have different cadences (ADR-0005):
+systemd timer. The per-metric floors make any cadence safe (ADR-0008): each
+run reads only measurements strictly newer than its floor, so scheduled runs
+never duplicate entries or re-send data — as long as the floors are
+machine-maintained (flag backfills and hand-lowered floors are the
+exceptions; see the backfill caveat above).
 
 ```cron
-# Weight every 2 hours: Garmin dedups re-sends by timestamp, so frequent runs
-# are safe.
+# Weight every 2 hours.
 0 */2 * * * /home/you/.cargo/bin/withings-garmin-sync sync weight --apply >> /home/you/.local/log/wgs-weight.log 2>&1
 
-# Blood pressure once a day, in the evening.
-15 21 * * * /home/you/.cargo/bin/withings-garmin-sync sync bp --apply >> /home/you/.local/log/wgs-bp.log 2>&1
+# Blood pressure every 2 hours: afternoon and evening readings land the
+# same day, and multiple same-day readings are all preserved.
+30 */2 * * * /home/you/.cargo/bin/withings-garmin-sync sync bp --apply >> /home/you/.local/log/wgs-bp.log 2>&1
 ```
 
-Weight re-writes never double-count (Garmin deduplicates them by timestamp),
-so the weight run can happen as often as you like. Blood pressure is
-**once-a-day**: its dedup is day-granular (a run skips any day Garmin already
-has), so a reading taken after that day's BP run is skipped by later runs too
-and cannot be recovered. Schedule the BP run in the evening, after your last
-reading of the day.
+Do not force an older window on a schedule (see the backfill caveat above):
+because Garmin does not dedup BP writes, re-sending old blood-pressure
+measurements duplicates them. Reserve `--since` and hand-lowered floors for
+deliberate, one-off backfills.
 
 ## Environment variables
 
