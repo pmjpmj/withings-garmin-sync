@@ -14,16 +14,44 @@ that ADR-0010 supersedes it.
 
 **Blocked by:** 01 (the docs describe the shipped behavior).
 
-**Status:** ready-for-agent
+**Status:** resolved
 
-- [ ] README floors section explains the checkpoint semantics in the
+- [x] README floors section explains the checkpoint semantics in the
   project's glossary vocabulary (sync floor, apply, rolling window)
-- [ ] README backfill section no longer claims flag-driven applies advance
+- [x] README backfill section no longer claims flag-driven applies advance
   floors; it says they leave floors untouched
-- [ ] README BP-duplication warning covers the recent-data backfill case and
+- [x] README BP-duplication warning covers the recent-data backfill case and
   names the hand-adjust-floor remedy
-- [ ] spec story 19 carries a `## Comments` supersession note referencing
+- [x] spec story 19 carries a `## Comments` supersession note referencing
   ADR-0010, without rewriting the historical story text
-- [ ] No `README`/spec claim contradicts ADR-0010
+- [x] No `README`/spec claim contradicts ADR-0010
+
+## Answer
+
+Operator docs updated for ADR-0010.
+
+- `README.md` Configuration section: the example comment now reads
+  "everything at or before this is handled", the prose defines a floor as
+  the Withings query timestamp of the metric's last clean flag-free apply
+  (written or verified absent), notes that applies with `--since`/`--until`
+  never touch floors, and names the rolling-window bootstrap in glossary
+  vocabulary. The migration note now says "clean flag-free apply".
+- `README.md` backfill caveat: the `--since` bullet no longer claims a
+  successful backfill advances floors — it says flag-driven applies leave
+  them untouched, and splits the older-than-floor case (no knock-on effect)
+  from the newer-than-floor case (next scheduled run re-sends it, duplicating
+  BP; remedy = hand-adjusted floor in `config.toml`). The intro now says
+  forced windows "can" duplicate BP.
+- `README.md` Scheduling section: "never duplicate entries or re-send data"
+  is now qualified by "as long as the floors are machine-maintained", with
+  the flags/hand-edit exceptions pointed at the backfill caveat.
+- `.scratch/per-metric-sync-floors/spec.md`: appended a `## Comments`
+  section recording that ADR-0010 supersedes story 19 (flag-driven applies
+  never advance floors; clean applies land on the query timestamp), and
+  also noting the story-10, Implementation-Decisions, and Testing-Decisions
+  wording ADR-0010 supersedes. Historical story text is untouched.
+- Verified via grep that no README/spec claim contradicts ADR-0010.
+
+No code changed; docs-only, so no typecheck/tests were needed.
 
 ## Comments

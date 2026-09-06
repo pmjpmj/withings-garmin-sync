@@ -137,25 +137,29 @@ client_id = "your-client-id"
 client_secret = "your-client-secret"
 
 # Optional per-metric sync floors (RFC 3339 UTC datetimes). The CLI rewrites
-# these after every successful apply; you normally never edit them by hand.
+# these after every clean flag-free apply; you normally never edit them by hand.
 [sync.weight]
-since = "2026-01-02T08:30:00Z"   # newest measurement already written to Garmin
+since = "2026-01-02T08:30:00Z"   # everything at or before this is handled
 
 [sync.bp]
 since = "2026-01-02T08:30:00Z"
 ```
 
-Each floor marks the newest Withings measurement already written to Garmin;
-the next run starts strictly newer than it (`floor + 1`). A metric without a
-floor bootstraps from the built-in rolling last 24 hours, exactly like a
-fresh install.
+Each floor marks the Withings query timestamp of that metric's last clean
+flag-free apply (ADR-0010): everything at or before it is handled — written
+or verified absent. A clean `sync --apply` advances the floor to the query
+timestamp whether the metric wrote data, wrote nothing, or had every
+reading skipped; applies with `--since`/`--until` never touch floors. The
+next run reads strictly newer (`floor + 1`). A metric without a floor
+bootstraps from the built-in rolling window (the last 24 hours), exactly
+like a fresh install.
 
 **Migration note:** the old shared `sync.since` key (a `YYYY-MM-DD` date) is
 removed. Existing configs keep loading — the key is simply ignored — and the
 first apply after upgrading bootstraps from the rolling window as if the
 floors were absent. Configs carrying the pre-ADR-0009 integer-epoch floors
-also keep loading with identical behavior; the next successful apply (or an
-`auth` rewrite) stores them in the canonical ISO form.
+also keep loading with identical behavior; the next clean flag-free apply
+(or an `auth` rewrite) stores them in the canonical ISO form.
 
 ## Usage
 
@@ -185,15 +189,19 @@ withings-garmin-sync --config-dir /tmp/wgs-test sync --verbose
 
 Normal scheduled runs never re-send anything: each metric reads only
 measurements strictly newer than its floor. Two ways to force an older
-window exist, and both **duplicate blood-pressure entries** — Garmin's BP
-endpoint does not deduplicate writes, so re-writing an already-synced BP
-measurement creates a duplicate (weight is unaffected: Garmin dedups weight
-writes by timestamp).
+window exist, and both can **duplicate blood-pressure entries** when they
+re-write an already-synced BP measurement — Garmin's BP endpoint does not
+deduplicate writes (weight is unaffected: Garmin dedups weight writes by
+timestamp).
 
 - `--since 2026-01-01` (optionally with `--until`) bypasses the floors for
-  one run and re-reads from the flag date. A successful apply then advances
-  the floors to the newest written measurement, so later scheduled runs
-  continue from there.
+  one run and re-reads from the flag date. Flag-driven applies leave the
+  floors untouched. A backfill of data older than the floor has no knock-on
+  effect: the floor stays put and the next scheduled run skips that data as
+  before. A backfill that reaches data *newer* than the floor is different:
+  the next scheduled run re-sends that newer data, duplicating BP (no Garmin
+  dedup). The remedy is a hand-adjusted floor in `config.toml` — set the
+  floor to the newest backfilled timestamp so the next run skips it.
 - Hand-lowering a floor in `config.toml` (e.g. `sync.bp.since` → an earlier
   datetime like `"2026-01-01T00:00:00Z"`, or a plain `YYYY-MM-DD` date,
   which means midnight UTC) makes every subsequent apply re-send the older
@@ -219,7 +227,9 @@ same-second weigh-ins do not occur in practice.
 `sync --apply` is non-interactive after `auth`, so it runs fine from cron or a
 systemd timer. The per-metric floors make any cadence safe (ADR-0008): each
 run reads only measurements strictly newer than its floor, so scheduled runs
-never duplicate entries and never re-send data.
+never duplicate entries or re-send data — as long as the floors are
+machine-maintained (flag backfills and hand-lowered floors are the
+exceptions; see the backfill caveat above).
 
 ```cron
 # Weight every 2 hours.

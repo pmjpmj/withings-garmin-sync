@@ -184,3 +184,21 @@ duplicates it; this is documented explicitly rather than silently guarded.
   sharing the exact second of the last written one would be skipped. For BP
   that is effectively the same reading; for weight, same-second weigh-ins do
   not occur in practice.
+
+## Comments
+
+- Story 19 is superseded by ADR-0010 (read-checkpoint floors): flag-driven
+  applies (`--since`/`--until`) never advance floors; a backfill re-reads
+  its window and the stored floors stay put. Only clean flag-free applies
+  advance floors, and they land on the Withings query timestamp rather than
+  the newest written measurement. The story text above is kept as the
+  historical record.
+- ADR-0010 also supersedes the story-10 desire (a write-free run leaves the
+  floor untouched — a clean flag-free apply now advances it even when
+  nothing was written, under the ADR's recorded late-arrival and
+  clock-alignment assumptions) and the corresponding wording in
+  Implementation Decisions ("This happens for every successful apply,
+  including flag-driven backfills. Dry runs, failed metrics, and empty runs
+  never write the config") and Testing Decisions ("`--since` … still
+  advances it"; "dry-run and empty runs never modify config"). The current
+  behavior is pinned in `tests/floors.rs`.
