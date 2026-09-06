@@ -73,6 +73,62 @@ impl MetricScope {
     }
 }
 
+/// One metric's resolved lower bound for a sync run (ADR-0008).
+struct MetricBound {
+    /// The Withings `startdate` this metric's window needs: `floor + 1` when
+    /// floored (strictly newer), else the flag or rolling value.
+    epoch: i64,
+    /// Client-side keep filter: drop readings with `epoch < keep_from`.
+    /// Always set for floor-derived bounds (so a fake or real server never
+    /// re-delivers the last-written measurement); rolling bounds filter only
+    /// when a combined read started earlier than them.
+    keep_from: Option<i64>,
+}
+
+impl MetricBound {
+    fn resolve(
+        floor: Option<i64>,
+        since_flag: Option<i64>,
+        until_flag: Option<i64>,
+        now: i64,
+    ) -> Self {
+        if let Some(since) = since_flag {
+            // An explicit flag bounds the window by itself (ADR-0001); the
+            // floor plays no part and nothing is filtered client-side.
+            return MetricBound {
+                epoch: since,
+                keep_from: None,
+            };
+        }
+        if until_flag.is_some() {
+            // `--until` alone means "from the beginning" (ADR-0001).
+            return MetricBound {
+                epoch: 0,
+                keep_from: None,
+            };
+        }
+        match floor {
+            Some(floor) => MetricBound {
+                epoch: floor + 1,
+                keep_from: Some(floor + 1),
+            },
+            None => MetricBound {
+                epoch: now - DEFAULT_WINDOW_SECS,
+                keep_from: None,
+            },
+        }
+    }
+}
+
+/// The flag-free report label for one metric's bound: its floor, or the
+/// rolling bootstrap.
+fn floor_label(name: &str, floor: Option<i64>) -> String {
+    match floor {
+        Some(floor) => format!("{name} floor {floor}"),
+        None => "last 24 hours".to_string(),
+    }
+}
+
 /// Run a parsed command, returning the process exit code or a terminal error.
 pub fn run(cli: cli::Cli) -> Result<i32, AppError> {
     match cli.command {
@@ -329,59 +385,6 @@ where
     }
 }
 
-/// Read one Garmin record. A `401` triggers a DI token refresh (persisted)
-/// followed by a single retry; a rejected refresh is returned as an auth
-/// error (`EXIT_AUTH`) so the run aborts with "re-run `auth garmin`".
-fn garmin_read<F, T>(
-    client: &http::HttpClient,
-    state: &mut GarminTokenState,
-    tokens_path: &std::path::Path,
-    tokens: &mut config::Tokens,
-    read: F,
-) -> Result<T, AppError>
-where
-    F: Fn(&http::HttpClient, &str) -> Result<T, garmin::WriteFailure>,
-{
-    match read(client, &state.access_token) {
-        Ok(value) => Ok(value),
-        Err(garmin::WriteFailure::Unauthorized) => {
-            let refreshed = garmin::refresh(client, &state.client_id, &state.refresh_token)
-                .map_err(|error| {
-                    AppError::new(
-                        EXIT_AUTH,
-                        format!(
-                            "Garmin token refresh failed: {}; re-run `auth garmin`",
-                            error.message
-                        ),
-                    )
-                })?;
-            state.access_token = refreshed.access_token;
-            if let Some(rotate) = refreshed.refresh_token {
-                state.refresh_token = rotate;
-            }
-            tokens.garmin = config::GarminTokens {
-                access_token: state.access_token.clone(),
-                refresh_token: state.refresh_token.clone(),
-                client_id: Some(state.client_id.clone()),
-            };
-            config::write_tokens(tokens_path, tokens)?;
-
-            // The single retry with the fresh token.
-            match read(client, &state.access_token) {
-                Ok(value) => Ok(value),
-                Err(failure) => Err(AppError::new(
-                    EXIT_METRIC_FAILURE,
-                    failure.message().to_string(),
-                )),
-            }
-        }
-        Err(failure) => Err(AppError::new(
-            EXIT_METRIC_FAILURE,
-            failure.message().to_string(),
-        )),
-    }
-}
-
 /// Read one line of operator input, prompting on stderr so stdout stays
 /// report-only. Empty input (closed stdin) is an auth error. `retry` names
 /// the command to re-run (e.g. `auth withings` or `auth garmin`).
@@ -472,7 +475,7 @@ fn run_sync(cli_args: SyncArgs) -> Result<i32, AppError> {
     let dir = config::resolve_config_dir(args.config_dir.as_deref())?;
 
     // Fail fast on missing/invalid config or tokens (exit 3).
-    let config = config::load_config(&dir)?;
+    let mut config = config::load_config(&dir)?;
     let mut tokens = config::load_tokens(&dir)?;
     if tokens.withings.access_token.trim().is_empty()
         || tokens.garmin.access_token.trim().is_empty()
@@ -531,43 +534,41 @@ fn run_sync(cli_args: SyncArgs) -> Result<i32, AppError> {
         config::write_tokens(&config::tokens_path(&dir), &tokens)?;
     }
 
-    // Resolve the sync window: --since/--until flags win, then the config's
-    // sync.since default, then the built-in rolling 24-hour window.
+    // Resolve the sync window per metric (ADR-0008): `--since`/`--until`
+    // flags win, then the metric's machine-updated floor (`sync.weight.since`
+    // / `sync.bp.since`, read strictly newer), then the built-in rolling
+    // last 24 hours (the bootstrap for a metric with no floor yet).
     let now = timefmt::now_epoch();
     let until_flag = args.until.as_deref().map(timefmt::parse_date).transpose()?;
     let until = until_flag.unwrap_or(now);
-    let default_since = if until_flag.is_some() {
-        0 // `--until` alone means "from the beginning until ..."
-    } else {
-        now - DEFAULT_WINDOW_SECS
-    };
     let since_flag = args.since.as_deref().map(timefmt::parse_date).transpose()?;
-    let since = since_flag.or_else(|| {
-        // An explicit `--until` bounds the window by itself; the config's
-        // `sync.since` default only applies when no window flag is given.
-        if until_flag.is_some() {
-            None
-        } else {
-            config
-                .sync
-                .since
-                .as_deref()
-                .map(timefmt::parse_date)
-                .transpose()
-                .ok()
-                .flatten()
+    if let (Some(since), Some(until)) = (since_flag, until_flag) {
+        if since > until {
+            return Err(AppError::new(
+                EXIT_USAGE,
+                format!("invalid window: --since {since} is after --until {until}"),
+            ));
         }
-    });
-    let since = since.unwrap_or(default_since);
-    if since > until {
-        return Err(AppError::new(
-            EXIT_USAGE,
-            format!("invalid window: --since {since} is after --until {until}"),
-        ));
     }
 
+    let weight_bound = MetricBound::resolve(config.sync.weight.since, since_flag, until_flag, now);
+    let bp_bound = MetricBound::resolve(config.sync.bp.since, since_flag, until_flag, now);
+
     let window_label = if since_flag.is_none() && until_flag.is_none() {
-        "last 24 hours".to_string()
+        match scope {
+            MetricScope::Weight => floor_label("weight", config.sync.weight.since),
+            MetricScope::Bp => floor_label("bp", config.sync.bp.since),
+            MetricScope::All
+                if config.sync.weight.since.is_none() && config.sync.bp.since.is_none() =>
+            {
+                "last 24 hours".to_string()
+            }
+            MetricScope::All => format!(
+                "{}, {}",
+                floor_label("weight", config.sync.weight.since),
+                floor_label("bp", config.sync.bp.since)
+            ),
+        }
     } else {
         match (since_flag, until_flag) {
             (Some(_), Some(_)) => format!(
@@ -582,19 +583,68 @@ fn run_sync(cli_args: SyncArgs) -> Result<i32, AppError> {
     };
 
     // Read the window from Withings once, scoped to the metric(s) in play
-    // (ADR-0005): a single-metric run never fetches the other metric. A
-    // mid-read auth rejection refreshes the token once and retries
-    // (ADR-0007).
+    // (ADR-0005): a single-metric run never fetches the other metric. The
+    // combined run reads at the earliest per-metric bound and filters each
+    // metric client-side to its own bound (ADR-0008). A mid-read auth
+    // rejection refreshes the token once and retries (ADR-0007).
+    let read_start = match (include_weight, include_bp) {
+        (true, true) => weight_bound.epoch.min(bp_bound.epoch),
+        (true, false) => weight_bound.epoch,
+        (false, true) => bp_bound.epoch,
+        (false, false) => unreachable!("a sync scope always includes at least one metric"),
+    };
+    // A bound newer than the upper bound (e.g. a floor slightly in the
+    // future after clock skew) reads nothing rather than sending Withings
+    // an inverted window.
+    let mut groups = Vec::new();
     let tokens_path = config::tokens_path(&dir);
-    let groups = withings_read(
-        &client,
-        &tokens_path,
-        &mut tokens,
-        &config.withings.client_id,
-        &config.withings.client_secret,
-        |c, t| withings::read_measures(c, t, since, until, scope.meastypes()),
-    )?;
+    if read_start <= until {
+        groups = withings_read(
+            &client,
+            &tokens_path,
+            &mut tokens,
+            &config.withings.client_id,
+            &config.withings.client_secret,
+            |c, t| withings::read_measures(c, t, read_start, until, scope.meastypes()),
+        )?;
+    }
     let (weights, bps, skips) = transform::transform(groups);
+
+    // Each metric keeps only readings at or after its own resolved bound. A
+    // floor bound is always filtered (strictly newer: `floor + 1`), so the
+    // last-written measurement is never re-processed; a rolling bound is
+    // filtered only when the combined read started earlier than it.
+    let weight_keep_from = if include_weight {
+        weight_bound
+            .keep_from
+            .or_else(|| (weight_bound.epoch > read_start).then_some(weight_bound.epoch))
+    } else {
+        None
+    };
+    let bp_keep_from = if include_bp {
+        bp_bound
+            .keep_from
+            .or_else(|| (bp_bound.epoch > read_start).then_some(bp_bound.epoch))
+    } else {
+        None
+    };
+    let weights: Vec<transform::WeightReading> = weights
+        .into_iter()
+        .filter(|w| weight_keep_from.is_none_or(|bound| w.epoch >= bound))
+        .collect();
+    let bps: Vec<transform::BpReading> = bps
+        .into_iter()
+        .filter(|b| bp_keep_from.is_none_or(|bound| b.epoch >= bound))
+        .collect();
+    let skips: Vec<transform::Skip> = skips
+        .into_iter()
+        .filter(|skip| match skip.metric {
+            transform::Metric::Weight => weight_keep_from.is_none_or(|bound| skip.epoch >= bound),
+            transform::Metric::BloodPressure => {
+                bp_keep_from.is_none_or(|bound| skip.epoch >= bound)
+            }
+        })
+        .collect();
 
     for skip in &skips {
         eprintln!(
@@ -673,38 +723,12 @@ fn run_sync(cli_args: SyncArgs) -> Result<i32, AppError> {
         client_id: tokens.garmin.client_id.clone().unwrap_or_default(),
     };
 
-    // Ticket 12: Garmin does not dedup blood-pressure writes by timestamp,
-    // so before writing BP, read back the days Garmin already has and skip
-    // any Withings reading on those days. Weight needs no read-back (its
-    // endpoint dedups). A failed read-back fails the BP metric closed rather
-    // than risk duplicates. A weight-scoped run never touches this path.
-    let mut bp_existing_days: std::collections::HashSet<String> = std::collections::HashSet::new();
-    let mut bp_readback_failed = false;
-    if include_bp && !bps.is_empty() {
-        let start_date = timefmt::local_date(since);
-        let end_date = timefmt::local_date(until);
-        match garmin_read(
-            &client,
-            &mut garmin_state,
-            &tokens_path,
-            &mut tokens,
-            |c, t| garmin::read_bp_dates(c, t, &start_date, &end_date),
-        ) {
-            Ok(dates) => bp_existing_days = dates.into_iter().collect(),
-            Err(error) if error.code == EXIT_AUTH => return Err(error),
-            Err(error) => {
-                eprintln!(
-                    "error: blood-pressure read-back failed: {}; skipping all blood-pressure writes this run",
-                    error.message
-                );
-                bp_readback_failed = true;
-            }
-        }
-    }
-
     let mut weight_failed = 0usize;
     let mut bp_failed = 0usize;
-    let mut bp_dedup_skipped = 0usize;
+    // The newest Withings timestamp among each metric's successfully written
+    // measurements; the floors advance to these after a clean metric.
+    let mut weight_newest: Option<i64> = None;
+    let mut bp_newest: Option<i64> = None;
     if include_weight {
         for weight in &weights {
             let payload = garmin::weight_payload(
@@ -720,7 +744,10 @@ fn run_sync(cli_args: SyncArgs) -> Result<i32, AppError> {
                 &mut tokens,
                 garmin::write_weight,
             ) {
-                Ok(()) => {}
+                Ok(()) => {
+                    weight_newest =
+                        Some(weight_newest.map_or(weight.epoch, |m| m.max(weight.epoch)));
+                }
                 Err(error) if error.code == EXIT_AUTH => return Err(error),
                 Err(error) => {
                     eprintln!("error: weight write failed: {}", error.message);
@@ -731,23 +758,6 @@ fn run_sync(cli_args: SyncArgs) -> Result<i32, AppError> {
     }
     if include_bp {
         for bp in &bps {
-            if bp_readback_failed {
-                bp_failed += 1;
-                continue;
-            }
-            // Skip re-writes of days Garmin already has (ticket 12): the BP
-            // endpoint does not dedup by timestamp, so identical re-writes would
-            // duplicate. Day granularity is the finest the read-back exposes.
-            let day = timefmt::local_date(bp.epoch);
-            if bp_existing_days.contains(&day) {
-                eprintln!(
-                    "warning: skipping blood-pressure reading at {}: {} already on Garmin",
-                    timefmt::local_ms(bp.epoch),
-                    day
-                );
-                bp_dedup_skipped += 1;
-                continue;
-            }
             let payload = garmin::bp_payload(
                 &timefmt::local_ms(bp.epoch),
                 &timefmt::gmt_ms(bp.epoch),
@@ -763,7 +773,9 @@ fn run_sync(cli_args: SyncArgs) -> Result<i32, AppError> {
                 &mut tokens,
                 garmin::write_blood_pressure,
             ) {
-                Ok(()) => {}
+                Ok(()) => {
+                    bp_newest = Some(bp_newest.map_or(bp.epoch, |m| m.max(bp.epoch)));
+                }
                 Err(error) if error.code == EXIT_AUTH => return Err(error),
                 Err(error) => {
                     eprintln!("error: blood-pressure write failed: {}", error.message);
@@ -774,11 +786,37 @@ fn run_sync(cli_args: SyncArgs) -> Result<i32, AppError> {
     }
 
     let weight_written = weights.len().saturating_sub(weight_failed);
-    let bp_written = bps
-        .len()
-        .saturating_sub(bp_failed)
-        .saturating_sub(bp_dedup_skipped);
+    let bp_written = bps.len().saturating_sub(bp_failed);
     let any_failed = weight_failed > 0 || bp_failed > 0;
+
+    // Floor advancement (ADR-0008): a metric's floor moves to the newest
+    // written timestamp only when every one of that metric's writes
+    // succeeded; empty runs and failed metrics leave the floor untouched.
+    // The whole config is rewritten through the existing 0600 write path. A
+    // config-write failure after successful Garmin writes warns but does not
+    // change the run's reported outcome.
+    let mut floors_changed = false;
+    if include_weight && weight_failed == 0 {
+        if let Some(epoch) = weight_newest {
+            config.sync.weight.since = Some(epoch);
+            floors_changed = true;
+        }
+    }
+    if include_bp && bp_failed == 0 {
+        if let Some(epoch) = bp_newest {
+            config.sync.bp.since = Some(epoch);
+            floors_changed = true;
+        }
+    }
+    if floors_changed {
+        if let Err(error) = config::write_config(&config::config_path(&dir), &config) {
+            eprintln!(
+                "warning: could not write config after Garmin writes succeeded: {}; \
+                 the sync floors did not advance and the next run may re-send measurements",
+                error.message
+            );
+        }
+    }
 
     // Reporting is metric-aware (ADR-0005): a single-metric run reports only
     // its own metric and names it in the summary. Exit codes are unchanged.
@@ -788,8 +826,7 @@ fn run_sync(cli_args: SyncArgs) -> Result<i32, AppError> {
                 "apply ({window_label}): weight: {weight_written} written, {weight_skips} skipped, {weight_failed} failed"
             );
             println!(
-                "apply ({window_label}): blood-pressure: {bp_written} written, {} skipped, {bp_failed} failed",
-                bp_skips + bp_dedup_skipped
+                "apply ({window_label}): blood-pressure: {bp_written} written, {bp_skips} skipped, {bp_failed} failed"
             );
             if any_failed {
                 println!("summary: 1 metric(s) failed");
@@ -813,8 +850,7 @@ fn run_sync(cli_args: SyncArgs) -> Result<i32, AppError> {
         }
         MetricScope::Bp => {
             println!(
-                "apply ({window_label}): blood-pressure: {bp_written} written, {} skipped, {bp_failed} failed",
-                bp_skips + bp_dedup_skipped
+                "apply ({window_label}): blood-pressure: {bp_written} written, {bp_skips} skipped, {bp_failed} failed"
             );
             if any_failed {
                 println!("summary: blood-pressure failed");

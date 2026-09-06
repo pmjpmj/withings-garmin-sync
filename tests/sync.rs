@@ -68,8 +68,10 @@ fn single_page_withings(groups: Vec<serde_json::Value>) -> FakeServer {
     })])
 }
 
-/// Garmin API fake that accepts weight (204) and BP (200) writes, and answers
-/// the BP range read-back (ticket 12) with "no existing measurements".
+/// Garmin API fake that accepts weight (204) and BP (200) writes. The BP
+/// range read-back route is deliberately absent (ADR-0008 deleted it); a
+/// run that still calls it would get a 404 and the tests fail on the
+/// missing writes.
 fn ok_garmin() -> FakeServer {
     FakeServer::start(vec![
         Route::post("/weight-service/user-weight", |_req, _i| {
@@ -77,12 +79,6 @@ fn ok_garmin() -> FakeServer {
         }),
         Route::post("/bloodpressure-service/bloodpressure", |_req, _i| {
             FakeResponse::json(200, "{}")
-        }),
-        Route::get_prefix("/bloodpressure-service/bloodpressure/range", |_req, _i| {
-            FakeResponse::json(
-                200,
-                r#"{"from":"2026-01-02","until":"2026-01-02","measurementSummaries":[]}"#,
-            )
         }),
     ])
 }
@@ -418,7 +414,8 @@ fn sync_bp_apply_never_touches_the_weight_endpoint() {
         "{:#?}",
         garmin.requests()
     );
-    // The BP dedup read-back still happens for a bp-only run.
+    // No Garmin read ever happens anymore: the day-granular BP read-back was
+    // deleted with the floors (ADR-0008), so a bp-only run is writes-only.
     let bp_reads = garmin
         .requests()
         .into_iter()
@@ -428,7 +425,7 @@ fn sync_bp_apply_never_touches_the_weight_endpoint() {
                     .starts_with("/bloodpressure-service/bloodpressure/range")
         })
         .count();
-    assert_eq!(bp_reads, 1, "{:#?}", garmin.requests());
+    assert_eq!(bp_reads, 0, "{:#?}", garmin.requests());
     assert_eq!(
         garmin
             .requests_for("POST", "/bloodpressure-service/bloodpressure")
@@ -1041,12 +1038,6 @@ fn apply_metrics_are_independent_weight_failure_does_not_block_bp() {
         Route::post("/bloodpressure-service/bloodpressure", |_req, _i| {
             FakeResponse::json(200, "{}")
         }),
-        Route::get_prefix("/bloodpressure-service/bloodpressure/range", |_req, _i| {
-            FakeResponse::json(
-                200,
-                r#"{"from":"2026-01-02","until":"2026-01-02","measurementSummaries":[]}"#,
-            )
-        }),
     ]);
 
     let run = run_sync(&dir, &["--apply"], &withings, &garmin);
@@ -1075,66 +1066,6 @@ fn apply_metrics_are_independent_weight_failure_does_not_block_bp() {
         run.stdout.contains("summary: 1 metric(s) failed"),
         "stdout: {}",
         run.stdout
-    );
-}
-
-#[test]
-fn apply_rerun_skips_bp_days_already_on_garmin_but_rewrites_weight() {
-    let dir = TempDir::new();
-    write_valid_config_and_tokens(dir.path());
-    let withings = single_page_withings(vec![
-        weight_group(82400, -3, EPOCH),
-        bp_group(120, 80, Some(72), EPOCH + 1),
-    ]);
-    // The BP read-back is stateful: the first read sees no existing
-    // measurements, the second sees the day already populated (as a live
-    // Garmin account would after the first write).
-    let garmin = FakeServer::start(vec![
-        Route::post("/weight-service/user-weight", |_req, _i| {
-            FakeResponse::new(204, "")
-        }),
-        Route::post("/bloodpressure-service/bloodpressure", |_req, _i| {
-            FakeResponse::json(200, "{}")
-        }),
-        Route::get_prefix(
-            "/bloodpressure-service/bloodpressure/range",
-            |_req, call| {
-                if call == 0 {
-                    FakeResponse::json(
-                        200,
-                        r#"{"from":"2026-01-02","until":"2026-01-02","measurementSummaries":[]}"#,
-                    )
-                } else {
-                    FakeResponse::json(
-                        200,
-                        r#"{"from":"2026-01-02","until":"2026-01-02","measurementSummaries":[{"startDate":"2026-01-02","endDate":"2026-01-02","highSystolic":120,"highDiastolic":80,"lowSystolic":120,"lowDiastolic":80,"numOfMeasurements":1,"category":"STAGE_1_HIGH","categoryName":"NORMAL","measurements":[]}]}"#,
-                    )
-                }
-            },
-        ),
-    ]);
-
-    let first = run_sync(&dir, &["--apply"], &withings, &garmin);
-    let second = run_sync(&dir, &["--apply"], &withings, &garmin);
-
-    assert_eq!(first.code, 0, "stderr: {}", first.stderr);
-    assert_eq!(second.code, 0, "stderr: {}", second.stderr);
-
-    // Weight still writes every run (its endpoint dedups by timestamp); the
-    // BP write happens once — the second run's read-back sees the day and
-    // skips the re-write.
-    let weight_calls = garmin.requests_for("POST", "/weight-service/user-weight");
-    let bp_calls = garmin.requests_for("POST", "/bloodpressure-service/bloodpressure");
-    assert_eq!(weight_calls.len(), 2, "{:#?}", garmin.requests());
-    assert_eq!(bp_calls.len(), 1, "{:#?}", garmin.requests());
-    assert_eq!(weight_calls[0].body, weight_calls[1].body);
-    // The second run reports the BP reading as skipped, not written.
-    assert!(
-        second
-            .stdout
-            .contains("blood-pressure: 0 written, 1 skipped, 0 failed"),
-        "stdout: {}",
-        second.stdout
     );
 }
 

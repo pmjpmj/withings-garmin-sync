@@ -478,12 +478,6 @@ fn garmin_429_is_retried_whether_http_status_or_json_body() {
                 FakeResponse::json(200, "{}")
             }
         }),
-        Route::get_prefix("/bloodpressure-service/bloodpressure/range", |_req, _i| {
-            FakeResponse::json(
-                200,
-                r#"{"from":"2026-01-02","until":"2026-01-02","measurementSummaries":[]}"#,
-            )
-        }),
     ]);
     let diauth = FakeServer::start(vec![]);
 
@@ -589,17 +583,10 @@ fn persistent_json_429_is_failure_not_success() {
             ],"more":0,"offset":0}}"#,
         )
     })]);
-    let garmin = FakeServer::start(vec![
-        Route::get_prefix("/bloodpressure-service/bloodpressure/range", |_req, _i| {
-            FakeResponse::json(
-                200,
-                r#"{"from":"2026-01-02","until":"2026-01-02","measurementSummaries":[]}"#,
-            )
-        }),
-        Route::post("/bloodpressure-service/bloodpressure", |_req, _i| {
-            FakeResponse::json(200, r#"{"error":{"status-code":"429"}}"#)
-        }),
-    ]);
+    let garmin = FakeServer::start(vec![Route::post(
+        "/bloodpressure-service/bloodpressure",
+        |_req, _i| FakeResponse::json(200, r#"{"error":{"status-code":"429"}}"#),
+    )]);
     let diauth = FakeServer::start(vec![]);
 
     let run = run_sync(&dir, &["--apply"], &sync_env(&withings, &garmin, &diauth));
@@ -640,11 +627,11 @@ fn empty_tokens_file_exits_3_with_run_auth_hint() {
 }
 
 #[test]
-fn until_alone_means_beginning_despite_config_since() {
+fn until_alone_means_beginning_despite_floors() {
     let dir = TempDir::new();
     write_file(
         &dir.path().join("config.toml"),
-        "[withings]\nclient_id = \"test-client-id\"\nclient_secret = \"test-client-secret\"\n\n[sync]\nsince = \"2026-01-15\"\n",
+        "[withings]\nclient_id = \"test-client-id\"\nclient_secret = \"test-client-secret\"\n\n[sync.weight]\nsince = 1767342600\n\n[sync.bp]\nsince = 1767342600\n",
     );
     write_tokens(&dir, "wa", now_epoch_plus(3600), "ga");
     let withings = FakeServer::start(vec![Route::post("/measure", |_req, _i| empty_measures())]);
@@ -660,6 +647,7 @@ fn until_alone_means_beginning_despite_config_since() {
     assert_eq!(run.code, 0, "stderr: {}", run.stderr);
     let reads = withings.requests_for("POST", "/measure");
     let fields = parse_form(&reads[0].body);
+    // The floors are bypassed: `--until` alone keeps "from the beginning".
     assert_eq!(form_value(&fields, "startdate"), "0");
     assert_eq!(form_value(&fields, "enddate"), "1769904000");
 }

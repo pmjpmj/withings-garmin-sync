@@ -37,8 +37,29 @@ pub struct WithingsConfig {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SyncConfig {
+    #[serde(default, skip_serializing_if = "MetricFloor::is_empty")]
+    pub weight: MetricFloor,
+    #[serde(default, skip_serializing_if = "MetricFloor::is_empty")]
+    pub bp: MetricFloor,
+}
+
+/// One metric's machine-updated sync floor (ADR-0008): the epoch-second
+/// Withings timestamp of the newest measurement already written to Garmin.
+/// Absent = the metric has no floor yet and bootstraps from the rolling
+/// window. The legacy shared `sync.since` key is no longer part of the
+/// schema; if present in an existing file it is ignored.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct MetricFloor {
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub since: Option<String>,
+    pub since: Option<i64>,
+}
+
+impl MetricFloor {
+    /// An empty floor serializes away entirely, so a config with no floors
+    /// yet has no `[sync.weight]`/`[sync.bp]` tables.
+    fn is_empty(&self) -> bool {
+        self.since.is_none()
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

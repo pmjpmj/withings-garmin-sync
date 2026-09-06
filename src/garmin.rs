@@ -140,7 +140,6 @@ pub fn basic_auth_header(client_id: &str) -> String {
 
 const WEIGHT_PATH: &str = "/weight-service/user-weight";
 const BP_PATH: &str = "/bloodpressure-service/bloodpressure";
-const BP_RANGE_PATH: &str = "/bloodpressure-service/bloodpressure/range";
 
 /// Build the weight write payload (shape confirmed live in ticket 01).
 pub fn weight_payload(local: &str, gmt: &str, kg: f64) -> serde_json::Value {
@@ -185,8 +184,7 @@ pub fn bp_payload(
 
 /// Failure writing to Garmin Connect: either the token was rejected (the
 /// caller refreshes once and retries), or the write failed for another
-/// reason. Also used for the BP range read-back (ticket 12), which shares
-/// the same token/401/412/429 handling.
+/// reason.
 #[derive(Debug)]
 pub enum WriteFailure {
     Unauthorized,
@@ -303,104 +301,6 @@ pub fn write_blood_pressure(
     payload: &serde_json::Value,
 ) -> Result<(), WriteFailure> {
     write_json(client, BP_PATH, access_token, payload, 200)
-}
-
-/// The dates (local `YYYY-MM-DD`, `startDate`/`endDate` shape) on which
-/// Garmin already has at least one blood-pressure measurement, read back
-/// from the range endpoint over `[start, end]` (inclusive).
-///
-/// Ticket 12: Garmin does **not** dedup BP writes by timestamp, so the CLI
-/// must read back existing days and skip re-writes. The range endpoint only
-/// exposes per-day summaries (`measurementSummaries[].numOfMeasurements`)
-/// with `measurements: []` — no per-measurement timestamps — so dedup is
-/// day-granular: any day already carrying a measurement is treated as done.
-pub fn read_bp_dates(
-    client: &HttpClient,
-    access_token: &str,
-    start: &str,
-    end: &str,
-) -> Result<Vec<String>, WriteFailure> {
-    let url = client.garmin_api_url(&format!("{BP_RANGE_PATH}/{start}/{end}"));
-    let mut headers: Vec<(&str, &str)> = Vec::new();
-    for (name, value) in native_headers() {
-        if name != "Cache-Control" {
-            headers.push((name, value));
-        }
-    }
-    let auth = format!("Bearer {access_token}");
-    headers.push(("Authorization", auth.as_str()));
-
-    let (status, body) = crate::http::retry(
-        3,
-        |(status, body): &(u16, String)| is_rate_limited(*status, body),
-        || {
-            client.get(&url, &headers).map_err(|error| {
-                WriteFailure::Failed(AppError::new(
-                    crate::EXIT_METRIC_FAILURE,
-                    format!("read from Garmin {BP_RANGE_PATH} failed: {error}"),
-                ))
-            })
-        },
-    )?;
-    if is_rate_limited(status, &body) {
-        return Err(WriteFailure::Failed(AppError::new(
-            crate::EXIT_METRIC_FAILURE,
-            "Garmin is rate-limiting reads (429); try again later",
-        )));
-    }
-    if status == 200 {
-        return parse_bp_dates(&body);
-    }
-    if status == 401 {
-        return Err(WriteFailure::Unauthorized);
-    }
-    if status == 412 {
-        return Err(WriteFailure::Failed(AppError::new(
-            crate::EXIT_METRIC_FAILURE,
-            "Garmin returned HTTP 412 (upload consent required): grant \"upload consent\" \
-             in your Garmin Connect account settings (EU accounts need this), then re-run `sync --apply`"
-                .to_string(),
-        )));
-    }
-    Err(WriteFailure::Failed(AppError::new(
-        crate::EXIT_METRIC_FAILURE,
-        format!("read from Garmin {BP_RANGE_PATH} failed: HTTP {status}"),
-    )))
-}
-
-/// Extract the set of dates (`startDate`/`endDate` per summary) on which a
-/// BP measurement already exists. A malformed/empty body yields an empty
-/// set rather than an error: an unreadable read-back must not block the run.
-fn parse_bp_dates(body: &str) -> Result<Vec<String>, WriteFailure> {
-    let json: serde_json::Value = serde_json::from_str(body).map_err(|error| {
-        WriteFailure::Failed(AppError::new(
-            crate::EXIT_METRIC_FAILURE,
-            format!("unparseable blood-pressure read-back: {error}"),
-        ))
-    })?;
-    let mut dates: Vec<String> = Vec::new();
-    let summaries = json.get("measurementSummaries").and_then(|v| v.as_array());
-    let Some(summaries) = summaries else {
-        return Ok(dates);
-    };
-    for summary in summaries {
-        let has_measurements = summary
-            .get("numOfMeasurements")
-            .and_then(|v| v.as_u64())
-            .map(|n| n > 0)
-            .unwrap_or(false);
-        if !has_measurements {
-            continue;
-        }
-        for key in ["startDate", "endDate"] {
-            if let Some(date) = summary.get(key).and_then(|v| v.as_str()) {
-                if !date.is_empty() && !dates.iter().any(|d| d == date) {
-                    dates.push(date.to_string());
-                }
-            }
-        }
-    }
-    Ok(dates)
 }
 
 /// Result of the SSO login POST.
@@ -815,42 +715,5 @@ mod tests {
         );
         let without_pulse = bp_payload("L", "G", 120.0, 80.0, None);
         assert!(without_pulse.get("pulse").is_none());
-    }
-
-    #[test]
-    fn parse_bp_dates_reads_days_with_measurements_only() {
-        // The real read-back shape (ticket 12): summaries with
-        // numOfMeasurements and empty `measurements`, plus a day with zero
-        // measurements that must not be treated as already-synced.
-        let body = r#"{
-            "from": "2026-09-04",
-            "until": "2026-09-04",
-            "measurementSummaries": [
-                {"startDate": "2026-09-03", "endDate": "2026-09-03",
-                 "numOfMeasurements": 0, "measurements": []},
-                {"startDate": "2026-09-04", "endDate": "2026-09-04",
-                 "numOfMeasurements": 1, "measurements": []}
-            ]
-        }"#;
-        assert_eq!(
-            parse_bp_dates(body).unwrap(),
-            vec!["2026-09-04".to_string()]
-        );
-    }
-
-    #[test]
-    fn parse_bp_dates_is_empty_when_no_summaries() {
-        assert_eq!(
-            parse_bp_dates(
-                r#"{"from":"2026-09-04","until":"2026-09-04","measurementSummaries":[]}"#
-            )
-            .unwrap(),
-            Vec::<String>::new()
-        );
-    }
-
-    #[test]
-    fn parse_bp_dates_errors_on_malformed_json() {
-        assert!(parse_bp_dates("not json").is_err());
     }
 }
