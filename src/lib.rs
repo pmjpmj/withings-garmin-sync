@@ -120,11 +120,11 @@ impl MetricBound {
     }
 }
 
-/// The flag-free report label for one metric's bound: its floor, or the
-/// rolling bootstrap.
+/// The flag-free report label for one metric's bound: its floor in the
+/// canonical RFC 3339 UTC form (ADR-0009), or the rolling bootstrap.
 fn floor_label(name: &str, floor: Option<i64>) -> String {
     match floor {
-        Some(floor) => format!("{name} floor {floor}"),
+        Some(floor) => format!("{name} floor {}", timefmt::format_floor(floor)),
         None => "last 24 hours".to_string(),
     }
 }

@@ -1,4 +1,5 @@
-//! Black-box tests for ADR-0008: per-metric machine-updated sync floors.
+//! Black-box tests for ADR-0008/ADR-0009: per-metric machine-updated sync
+//! floors stored as human-readable RFC 3339 UTC datetimes.
 //!
 //! `sync.weight.since` / `sync.bp.since` in config.toml mark the newest
 //! Withings measurement already written to Garmin. A successful apply
@@ -115,7 +116,8 @@ fn run_sync(
 }
 
 /// A config.toml with the given credentials and per-metric floors (absent
-/// floors serialize to nothing).
+/// floors serialize to nothing). Floors are written in the canonical
+/// RFC 3339 UTC form, exactly as the machine writes them (ADR-0009).
 fn floored_config(
     weight: Option<i64>,
     bp: Option<i64>,
@@ -125,12 +127,21 @@ fn floored_config(
     let mut text =
         format!("[withings]\nclient_id = \"{client_id}\"\nclient_secret = \"{client_secret}\"\n");
     if let Some(floor) = weight {
-        text.push_str(&format!("\n[sync.weight]\nsince = {floor}\n"));
+        text.push_str(&format!("\n[sync.weight]\nsince = \"{}\"\n", floor_iso(floor)));
     }
     if let Some(floor) = bp {
-        text.push_str(&format!("\n[sync.bp]\nsince = {floor}\n"));
+        text.push_str(&format!("\n[sync.bp]\nsince = \"{}\"\n", floor_iso(floor)));
     }
     text
+}
+
+/// The canonical RFC 3339 UTC floor form for an epoch (the machine-written
+/// format; ADR-0009).
+fn floor_iso(epoch: i64) -> String {
+    chrono::DateTime::from_timestamp(epoch, 0)
+        .expect("test epochs are in range")
+        .format("%Y-%m-%dT%H:%M:%SZ")
+        .to_string()
 }
 
 fn read_config(dir: &TempDir) -> toml::Value {
@@ -143,13 +154,24 @@ fn config_text(dir: &TempDir) -> String {
 }
 
 /// `sync.<metric>.since` as an epoch-second integer, or `None` when the
-/// metric has no floor (or no `[sync]` section at all).
+/// metric has no floor (or no `[sync]` section at all). Accepts the
+/// canonical RFC 3339 string the machine writes and legacy integers (for
+/// reading a config before its next rewrite).
 fn floor(dir: &TempDir, metric: &str) -> Option<i64> {
-    read_config(dir)
+    let config = read_config(dir);
+    let since = config
         .get("sync")
         .and_then(|sync| sync.get(metric))
-        .and_then(|metric| metric.get("since"))
-        .and_then(|since| since.as_integer())
+        .and_then(|metric| metric.get("since"))?;
+    match since {
+        toml::Value::Integer(epoch) => Some(*epoch),
+        toml::Value::String(text) => Some(
+            chrono::DateTime::parse_from_rfc3339(text)
+                .expect("the machine writes floors in canonical RFC 3339")
+                .timestamp(),
+        ),
+        other => panic!("unexpected floor value: {other:?}"),
+    }
 }
 
 fn startdate(read: &common::RecordedRequest) -> i64 {
@@ -465,6 +487,16 @@ fn auth_withings_preserves_floors_when_rewriting_config() {
     );
     assert_eq!(floor(&dir, "weight"), Some(EPOCH));
     assert_eq!(floor(&dir, "bp"), Some(EPOCH + 1));
+    // The auth rewrite preserves the floors and emits them canonically.
+    let text = config_text(&dir);
+    assert!(
+        text.contains("since = \"2026-01-02T08:30:00Z\""),
+        "text: {text}"
+    );
+    assert!(
+        text.contains("since = \"2026-01-02T08:30:01Z\""),
+        "text: {text}"
+    );
 }
 
 #[test]
@@ -519,6 +551,253 @@ fn auth_garmin_leaves_floored_config_untouched() {
 
     assert_eq!(run.code, 0, "stderr: {}", run.stderr);
     assert_eq!(config_text(&dir), before);
+}
+
+// ---------------------------------------------------------------------------
+// RFC 3339 floors, hand-edits, and migration (ADR-0009, ticket 04)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn legacy_integer_floors_load_and_are_rewritten_canonically_by_the_next_apply() {
+    let dir = TempDir::new();
+    write_file(
+        &dir.path().join("config.toml"),
+        "[withings]\nclient_id = \"test-client-id\"\nclient_secret = \"test-client-secret\"\n\n\
+         [sync.weight]\nsince = 1767342600\n\n[sync.bp]\nsince = 1767342601\n",
+    );
+    write_file(&dir.path().join("tokens.json"), VALID_TOKENS);
+    let withings = single_page_withings(vec![
+        weight_group(82500, -3, EPOCH + 120),
+        bp_group(120, 80, Some(72), EPOCH + 90),
+    ]);
+    let garmin = ok_garmin();
+
+    let run = run_sync(&dir, &["all", "--apply"], &withings, &garmin);
+
+    assert_eq!(run.code, 0, "stderr: {}", run.stderr);
+    // The legacy integers load with their exact meaning: strictly newer.
+    assert_eq!(
+        startdate(&withings.requests_for("POST", "/measure")[0]),
+        EPOCH + 1
+    );
+    // Both floors advanced, and the rewrite emitted the canonical RFC 3339
+    // form (no integers anywhere).
+    assert_eq!(floor(&dir, "weight"), Some(EPOCH + 120));
+    assert_eq!(floor(&dir, "bp"), Some(EPOCH + 90));
+    let text = config_text(&dir);
+    assert!(!text.contains("since = 1767"), "text: {text}");
+    assert!(
+        text.contains("since = \"2026-01-02T08:32:00Z\""),
+        "text: {text}"
+    );
+    assert!(
+        text.contains("since = \"2026-01-02T08:31:30Z\""),
+        "text: {text}"
+    );
+}
+
+#[test]
+fn hand_written_date_floor_loads_as_midnight_utc_and_backfills() {
+    let dir = TempDir::new();
+    write_file(
+        &dir.path().join("config.toml"),
+        "[withings]\nclient_id = \"test-client-id\"\nclient_secret = \"test-client-secret\"\n\n\
+         [sync.bp]\nsince = \"2026-01-01\"\n",
+    );
+    write_file(&dir.path().join("tokens.json"), VALID_TOKENS);
+    let withings = single_page_withings(vec![bp_group(120, 80, Some(72), EPOCH)]);
+    let garmin = ok_garmin();
+
+    let run = run_sync(&dir, &["bp", "--apply"], &withings, &garmin);
+
+    assert_eq!(run.code, 0, "stderr: {}", run.stderr);
+    // The date means midnight UTC (same as --since): startdate = JAN1 + 1,
+    // so the EPOCH measurement is inside the window and gets written.
+    assert_eq!(
+        startdate(&withings.requests_for("POST", "/measure")[0]),
+        JAN1 + 1
+    );
+    assert_eq!(
+        garmin
+            .requests_for("POST", "/bloodpressure-service/bloodpressure")
+            .len(),
+        1
+    );
+    // The advance is written in canonical form.
+    assert_eq!(floor(&dir, "bp"), Some(EPOCH));
+    let text = config_text(&dir);
+    assert!(
+        text.contains("since = \"2026-01-02T08:30:00Z\""),
+        "text: {text}"
+    );
+}
+
+#[test]
+fn hand_edited_offset_and_fractional_floors_load_and_normalize() {
+    let dir = TempDir::new();
+    write_file(
+        &dir.path().join("config.toml"),
+        "[withings]\nclient_id = \"test-client-id\"\nclient_secret = \"test-client-secret\"\n\n\
+         [sync.weight]\nsince = \"2026-01-02T10:30:00+02:00\"\n\n\
+         [sync.bp]\nsince = \"2026-01-02T08:30:00.999Z\"\n",
+    );
+    write_file(&dir.path().join("tokens.json"), VALID_TOKENS);
+    let withings = single_page_withings(vec![
+        weight_group(82500, -3, EPOCH + 120),
+        bp_group(120, 80, Some(72), EPOCH + 90),
+    ]);
+    let garmin = ok_garmin();
+
+    let run = run_sync(&dir, &["all", "--apply"], &withings, &garmin);
+
+    assert_eq!(run.code, 0, "stderr: {}", run.stderr);
+    // Both forms load as the EPOCH instant: the offset converts to UTC and
+    // the fraction truncates toward the floor (never up), so the read stays
+    // strictly newer: startdate = EPOCH + 1.
+    assert_eq!(
+        startdate(&withings.requests_for("POST", "/measure")[0]),
+        EPOCH + 1
+    );
+    assert_eq!(floor(&dir, "weight"), Some(EPOCH + 120));
+    assert_eq!(floor(&dir, "bp"), Some(EPOCH + 90));
+    // The rewrite normalized both hand-edits to the canonical form.
+    let text = config_text(&dir);
+    assert!(
+        text.contains("since = \"2026-01-02T08:32:00Z\""),
+        "text: {text}"
+    );
+    assert!(
+        text.contains("since = \"2026-01-02T08:31:30Z\""),
+        "text: {text}"
+    );
+    assert!(!text.contains("+02:00"), "text: {text}");
+    assert!(!text.contains(".999"), "text: {text}");
+}
+
+#[test]
+fn malformed_floors_fail_config_load_with_exit_3() {
+    for (metric, value) in [
+        ("weight", "junk"),
+        ("weight", "2026-01-02T08:30:00"),      // naive: no timezone
+        ("bp", "2026-01-02 08:30:00Z"),         // space separator
+        ("bp", "2026-13-45"),                   // invalid date
+    ] {
+        let dir = TempDir::new();
+        write_file(
+            &dir.path().join("config.toml"),
+            &format!(
+                "[withings]\nclient_id = \"test-client-id\"\nclient_secret = \"test-client-secret\"\n\n\
+                 [sync.{metric}]\nsince = {value:?}\n"
+            ),
+        );
+        let withings = single_page_withings(vec![]);
+        let garmin = ok_garmin();
+
+        let run = run_sync(&dir, &[], &withings, &garmin);
+
+        assert_eq!(run.code, 3, "stdout: {}", run.stdout);
+        assert!(
+            run.stderr.contains("invalid config"),
+            "stderr for {metric}/{value:?}: {}",
+            run.stderr
+        );
+        assert!(
+            run.stderr.contains(&format!("sync.{metric}.since")),
+            "stderr for {metric}/{value:?}: {}",
+            run.stderr
+        );
+        assert!(
+            run.stderr.contains("RFC 3339"),
+            "stderr for {metric}/{value:?}: {}",
+            run.stderr
+        );
+        // Nothing ran: config load fails before any network read.
+        assert!(withings.requests().is_empty(), "{:#?}", withings.requests());
+    }
+}
+
+#[test]
+fn flag_free_report_labels_show_iso_floors() {
+    // Combined flag-free run labels both floors in the canonical form.
+    let dir = TempDir::new();
+    write_file(
+        &dir.path().join("config.toml"),
+        &floored_config(
+            Some(EPOCH),
+            Some(EPOCH + 1),
+            "test-client-id",
+            "test-client-secret",
+        ),
+    );
+    write_file(&dir.path().join("tokens.json"), VALID_TOKENS);
+    let withings = single_page_withings(vec![]);
+    let garmin = ok_garmin();
+
+    let run = run_sync(&dir, &[], &withings, &garmin);
+
+    assert_eq!(run.code, 0, "stderr: {}", run.stderr);
+    assert!(
+        run.stdout.contains(
+            "dry-run (weight floor 2026-01-02T08:30:00Z, bp floor 2026-01-02T08:30:01Z): \
+             would write 0 weight and 0 blood-pressure measurements"
+        ),
+        "stdout: {}",
+        run.stdout
+    );
+
+    // Single-metric label.
+    let run = run_sync(&dir, &["weight"], &withings, &garmin);
+    assert!(
+        run.stdout
+            .contains("dry-run (weight floor 2026-01-02T08:30:00Z)"),
+        "stdout: {}",
+        run.stdout
+    );
+
+    // The rolling bootstrap label is unchanged.
+    let dir2 = TempDir::new();
+    write_valid_config_and_tokens(dir2.path());
+    let run2 = run_sync(&dir2, &[], &withings, &garmin);
+    assert!(
+        run2.stdout.contains("dry-run (last 24 hours)"),
+        "stdout: {}",
+        run2.stdout
+    );
+
+    // Flag-derived labels are untouched.
+    let run3 = run_sync(
+        &dir2,
+        &["--since", "2026-01-01", "--until", "2026-02-01"],
+        &withings,
+        &garmin,
+    );
+    assert!(
+        run3.stdout.contains("dry-run (2026-01-01..2026-02-01)"),
+        "stdout: {}",
+        run3.stdout
+    );
+}
+
+#[test]
+fn dry_run_over_an_rfc3339_config_leaves_the_file_byte_identical() {
+    // Round-trip stability: a dry run over the canonical form never rewrites
+    // the config, so hand-written RFC 3339 survives byte-for-byte.
+    let dir = TempDir::new();
+    let text = floored_config(
+        Some(EPOCH),
+        Some(EPOCH + 1),
+        "test-client-id",
+        "test-client-secret",
+    );
+    write_file(&dir.path().join("config.toml"), &text);
+    write_file(&dir.path().join("tokens.json"), VALID_TOKENS);
+    let withings = single_page_withings(vec![weight_group(82400, -3, EPOCH + 60)]);
+    let garmin = ok_garmin();
+
+    let run = run_sync(&dir, &[], &withings, &garmin);
+
+    assert_eq!(run.code, 0, "stderr: {}", run.stderr);
+    assert_eq!(config_text(&dir), text);
 }
 
 // ---------------------------------------------------------------------------

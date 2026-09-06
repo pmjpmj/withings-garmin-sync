@@ -7,9 +7,9 @@ Connect, preserving each measurement's original timestamp.
 Garmin has no public write API for these metrics, so the CLI writes through
 Garmin's undocumented internal JSON endpoints (no FIT encoding). After a
 one-time interactive `auth` step, every subsequent `sync` is non-interactive
-and safe to re-run: each metric remembers its progress as an epoch-second
-floor in `config.toml` (`sync.weight.since` / `sync.bp.since`), and the next
-run reads only measurements strictly newer than the floor.
+and safe to re-run: each metric remembers its progress as an ISO-8601 floor
+in `config.toml` (`sync.weight.since` / `sync.bp.since`), and the next run
+reads only measurements strictly newer than the floor.
 
 Key properties:
 
@@ -136,13 +136,13 @@ Example `config.toml`:
 client_id = "your-client-id"
 client_secret = "your-client-secret"
 
-# Optional per-metric sync floors (epoch seconds). The CLI rewrites these
-# after every successful apply; you normally never edit them by hand.
+# Optional per-metric sync floors (RFC 3339 UTC datetimes). The CLI rewrites
+# these after every successful apply; you normally never edit them by hand.
 [sync.weight]
-since = 1767342600   # epoch seconds, machine-updated
+since = "2026-01-02T08:30:00Z"   # newest measurement already written to Garmin
 
 [sync.bp]
-since = 1767342600
+since = "2026-01-02T08:30:00Z"
 ```
 
 Each floor marks the newest Withings measurement already written to Garmin;
@@ -153,7 +153,9 @@ fresh install.
 **Migration note:** the old shared `sync.since` key (a `YYYY-MM-DD` date) is
 removed. Existing configs keep loading — the key is simply ignored — and the
 first apply after upgrading bootstraps from the rolling window as if the
-floors were absent.
+floors were absent. Configs carrying the pre-ADR-0009 integer-epoch floors
+also keep loading with identical behavior; the next successful apply (or an
+`auth` rewrite) stores them in the canonical ISO form.
 
 ## Usage
 
@@ -193,8 +195,9 @@ writes by timestamp).
   the floors to the newest written measurement, so later scheduled runs
   continue from there.
 - Hand-lowering a floor in `config.toml` (e.g. `sync.bp.since` → an earlier
-  epoch) makes every subsequent apply re-send the older measurements. Prefer
-  the flags for one-off backfills.
+  datetime like `"2026-01-01T00:00:00Z"`, or a plain `YYYY-MM-DD` date,
+  which means midnight UTC) makes every subsequent apply re-send the older
+  measurements. Prefer the flags for one-off backfills.
 
 One-second exclusivity: a run reads `floor + 1` onward, so a second,
 different measurement sharing the exact second of the stored floor is
