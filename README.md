@@ -108,6 +108,10 @@ It will:
 5. If MFA is required, prompt for the code (up to three attempts).
 6. Exchange both logins for tokens and store them.
 
+Secret prompts are masked when run in a terminal. When stdin is piped or
+redirected, input is read unmasked so `auth` remains scriptable; the command
+prints a note to stderr for each secret prompt.
+
 The two services' sessions die in different ways (Withings tokens expire on
 their own clock; Garmin kills sessions on external events like a password
 change or MFA policy). Repair one service without re-doing the other (ADR-0006):
