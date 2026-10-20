@@ -569,6 +569,66 @@ fn verbose_logs_each_request_and_response() {
 }
 
 #[test]
+fn verbose_sync_redacts_tokens_from_headers_and_response_body() {
+    let dir = TempDir::new();
+    write_file(&dir.path().join("config.toml"), CONFIG);
+    write_tokens(
+        &dir,
+        "wa-secret-token",
+        now_epoch_plus(3600),
+        "ga-secret-token",
+    );
+    let withings = FakeServer::start(vec![Route::post("/measure", |_req, _i| {
+        FakeResponse::json(
+            200,
+            r#"{"status":0,"access_token":"response-secret","body":{"updatetime":1767342600,"timezone":"UTC","measuregrps":[{"grpid":1,"attrib":2,"date":1767342600,"category":1,"measures":[{"value":82400,"type":1,"unit":-3}]}],"more":0,"offset":0}}"#,
+        )
+    })]);
+    let garmin = FakeServer::start(vec![Route::post(
+        "/weight-service/user-weight",
+        |_req, _i| FakeResponse::new(204, ""),
+    )]);
+    let diauth = FakeServer::start(vec![]);
+
+    let run = run_sync(&dir, &["--verbose"], &sync_env(&withings, &garmin, &diauth));
+
+    assert_eq!(run.code, 0, "stderr: {}", run.stderr);
+    for secret in ["wa-secret-token", "ga-secret-token", "response-secret"] {
+        assert!(
+            !run.stderr.contains(secret),
+            "leaked {secret}: {}",
+            run.stderr
+        );
+    }
+    assert!(
+        run.stderr.contains("Authorization: [REDACTED]"),
+        "{}",
+        run.stderr
+    );
+    assert!(run.stderr.contains("[REDACTED]"), "{}", run.stderr);
+}
+
+#[test]
+fn non_verbose_sync_error_redacts_token_in_response_body() {
+    let dir = TempDir::new();
+    write_file(&dir.path().join("config.toml"), CONFIG);
+    write_tokens(&dir, "wa", now_epoch_plus(3600), "ga");
+    let withings = FakeServer::start(vec![Route::post("/measure", |_req, _i| measure_page())]);
+    let garmin = FakeServer::start(vec![Route::post(
+        "/weight-service/user-weight",
+        |_req, _i| FakeResponse::json(400, r#"{"access_token":"error-secret"}"#),
+    )]);
+    let diauth = FakeServer::start(vec![]);
+
+    let run = run_sync(&dir, &["--apply"], &sync_env(&withings, &garmin, &diauth));
+
+    assert_ne!(run.code, 0);
+    assert!(!run.stderr.contains("error-secret"), "{}", run.stderr);
+    assert!(run.stderr.contains("access_token"), "{}", run.stderr);
+    assert!(run.stderr.contains("[REDACTED]"), "{}", run.stderr);
+}
+
+#[test]
 fn persistent_json_429_is_failure_not_success() {
     // A 200 whose JSON body keeps saying 429 must never be counted as a
     // successful blood-pressure write.

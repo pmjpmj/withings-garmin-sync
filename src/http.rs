@@ -67,10 +67,10 @@ impl HttpClient {
         }
         eprintln!("[verbose] -> {method} {url}");
         for (name, value) in headers {
-            eprintln!("[verbose]    {name}: {value}");
+            eprintln!("[verbose]    {}", redact_header(name, value));
         }
         if !body.is_empty() {
-            let preview: String = body.chars().take(300).collect();
+            let preview: String = redact_body(body).chars().take(300).collect();
             eprintln!("[verbose]    body: {preview}");
         }
     }
@@ -161,14 +161,14 @@ impl HttpClient {
             .headers()
             .iter()
             .map(|(name, value)| {
-                format!("{name}: {}", value.to_str().unwrap_or("<non-utf8 value>"))
+                redact_header(name.as_str(), value.to_str().unwrap_or("<non-utf8 value>"))
             })
             .collect();
         let body = response
             .text()
             .map_err(|error| HttpError::Transport(format!("{url}: {error}")))?;
         if self.verbose {
-            let preview: String = body.chars().take(300).collect();
+            let preview: String = redact_body(&body).chars().take(300).collect();
             eprintln!("[verbose] <- HTTP {status} ({version:?}) {url}");
             for header in &response_headers {
                 eprintln!("[verbose]    {header}");
@@ -212,11 +212,164 @@ impl std::fmt::Display for HttpError {
             HttpError::Status(status, body) => {
                 write!(f, "HTTP {status}")?;
                 if !body.trim().is_empty() {
-                    write!(f, ": {}", body.trim())?;
+                    write!(f, ": {}", redact_body(body).trim())?;
                 }
                 Ok(())
             }
         }
+    }
+}
+
+const SECRET_FIELDS: &[&str] = &[
+    "password",
+    "client_secret",
+    "access_token",
+    "refresh_token",
+    "service_ticket",
+    "code",
+];
+
+fn redact_header(name: &str, value: &str) -> String {
+    if name.eq_ignore_ascii_case("authorization") || name.eq_ignore_ascii_case("set-cookie") {
+        format!("{name}: [REDACTED]")
+    } else {
+        format!("{name}: {value}")
+    }
+}
+
+/// Scrub only the printable copy. Request and response bodies passed to
+/// protocol code remain untouched.
+pub(crate) fn redact_body(body: &str) -> String {
+    if let Ok(mut value) = serde_json::from_str::<serde_json::Value>(body) {
+        redact_json(&mut value);
+        return serde_json::to_string(&value).unwrap_or_else(|_| body.to_string());
+    }
+
+    // Form bodies are represented as key=value pairs. Preserve their original
+    // encoding and replace only values for explicitly named secret fields.
+    if body.contains('=') {
+        return body
+            .split('&')
+            .map(|pair| {
+                let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
+                if SECRET_FIELDS.contains(&decode_form_component(key).as_str()) {
+                    format!("{key}=[REDACTED]")
+                } else if pair.contains('=') {
+                    format!("{key}={value}")
+                } else {
+                    pair.to_string()
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("&");
+    }
+    body.to_string()
+}
+
+fn redact_json(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Object(map) => {
+            for (key, value) in map.iter_mut() {
+                // Garmin names the CAS ticket `serviceTicketId` in its SSO
+                // response; it is the same secret later sent as
+                // `service_ticket` in the token exchange.
+                if SECRET_FIELDS.contains(&key.as_str()) || key == "serviceTicketId" {
+                    *value = serde_json::Value::String("[REDACTED]".into());
+                } else {
+                    redact_json(value);
+                }
+            }
+        }
+        serde_json::Value::Array(values) => {
+            for value in values {
+                redact_json(value);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn decode_form_component(value: &str) -> String {
+    let bytes = value.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'+' => {
+                decoded.push(b' ');
+                i += 1;
+            }
+            b'%' if i + 2 < bytes.len() => {
+                if let (Some(a), Some(b)) = (hex(bytes[i + 1]), hex(bytes[i + 2])) {
+                    decoded.push(a * 16 + b);
+                    i += 3;
+                } else {
+                    decoded.push(bytes[i]);
+                    i += 1;
+                }
+            }
+            byte => {
+                decoded.push(byte);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&decoded).into_owned()
+}
+
+fn hex(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod redaction_tests {
+    use super::{redact_body, redact_header, HttpError};
+
+    #[test]
+    fn redacts_form_fields_and_preserves_safe_fields() {
+        assert_eq!(
+            redact_body("client_id=abc&client_secret=shh&code=one"),
+            "client_id=abc&client_secret=[REDACTED]&code=[REDACTED]"
+        );
+    }
+
+    #[test]
+    fn redacts_nested_json_secrets() {
+        assert_eq!(
+            redact_body(r#"{"access_token":"a","nested":[{"refresh_token":"r"}],"state":"ok"}"#),
+            r#"{"access_token":"[REDACTED]","nested":[{"refresh_token":"[REDACTED]"}],"state":"ok"}"#
+        );
+    }
+
+    #[test]
+    fn leaves_non_json_non_form_text_alone() {
+        assert_eq!(redact_body("service_ticket blah"), "service_ticket blah");
+    }
+
+    #[test]
+    fn redacts_sensitive_headers_case_insensitively() {
+        assert_eq!(
+            redact_header("authorization", "Bearer secret"),
+            "authorization: [REDACTED]"
+        );
+        assert_eq!(
+            redact_header("SET-cookie", "sid=secret"),
+            "SET-cookie: [REDACTED]"
+        );
+        assert_eq!(redact_header("x-safe", "value"), "x-safe: value");
+    }
+
+    #[test]
+    fn status_error_display_redacts_json_body() {
+        assert_eq!(
+            HttpError::Status(401, r#"{"access_token":"secret"}"#.into()).to_string(),
+            "HTTP 401: {\"access_token\":\"[REDACTED]\"}"
+        );
     }
 }
 

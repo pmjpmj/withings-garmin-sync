@@ -17,7 +17,7 @@
 //!
 //! Refresh uses the same token endpoint with `grant_type=refresh_token`.
 
-use crate::http::{query_encode, HttpClient, HttpError};
+use crate::http::{query_encode, redact_body, HttpClient, HttpError};
 use crate::AppError;
 
 pub const MOBILE_SSO_CLIENT_ID: &str = "GCM_ANDROID_DARK";
@@ -269,7 +269,7 @@ pub fn write_json(
             if body.trim().is_empty() {
                 String::new()
             } else {
-                format!(": {}", body.trim())
+                format!(": {}", redact_body(&body).trim())
             }
         ),
     )))

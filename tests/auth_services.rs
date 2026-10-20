@@ -167,6 +167,78 @@ fn bare_auth_runs_both_services_and_persists_both_sections() {
     );
 }
 
+#[test]
+fn verbose_auth_redacts_credentials_tokens_and_ticket() {
+    let dir = TempDir::new();
+    write_file(&dir.path().join("config.toml"), CONFIG);
+    let withings = FakeServer::start(vec![Route::post("/v2/oauth2", |_req, _i| {
+        FakeResponse::json(
+            200,
+            r#"{"status":0,"body":{"userid":1,"access_token":"withings-access-secret","refresh_token":"withings-refresh-secret","expires_in":10800,"scope":"x","token_type":"Bearer"}}"#,
+        )
+    })]);
+    let sso = FakeServer::start(vec![
+        Route::get("/mobile/sso/en_US/sign-in", |_req, _i| {
+            FakeResponse::new(200, "ok")
+        }),
+        Route::post("/mobile/api/login", |_req, _i| {
+            FakeResponse::json(
+                200,
+                r#"{"responseStatus":{"type":"SUCCESSFUL"},"serviceTicketId":"cas-ticket-secret"}"#,
+            )
+        }),
+    ]);
+    let diauth = FakeServer::start(vec![Route::post(
+        "/di-oauth2-service/oauth/token",
+        |_req, _i| {
+            FakeResponse::json(
+                200,
+                r#"{"access_token":"garmin-access-secret","refresh_token":"garmin-refresh-secret"}"#,
+            )
+        },
+    )]);
+
+    let run = run_bin_stdin(
+        &[
+            "auth",
+            "--verbose",
+            "--config-dir",
+            dir.path().to_str().unwrap(),
+        ],
+        &[
+            ("WGS_WITHINGS_API_BASE", withings.base_url.as_str()),
+            ("WGS_GARMIN_SSO_BASE", sso.base_url.as_str()),
+            ("WGS_GARMIN_DIAUTH_BASE", diauth.base_url.as_str()),
+        ],
+        Some("auth-code-secret\nuser@example.com\ngarmin-password-secret\n"),
+    );
+
+    assert_eq!(run.code, 0, "stderr: {}", run.stderr);
+    for secret in [
+        "auth-code-secret",
+        "garmin-password-secret",
+        "test-client-secret",
+        "cas-ticket-secret",
+        "withings-access-secret",
+        "withings-refresh-secret",
+        "garmin-access-secret",
+        "garmin-refresh-secret",
+    ] {
+        assert!(
+            !run.stderr.contains(secret),
+            "leaked {secret}: {}",
+            run.stderr
+        );
+    }
+    for field in ["code", "password", "client_secret", "service_ticket"] {
+        assert!(
+            run.stderr.contains(field),
+            "missing {field}: {}",
+            run.stderr
+        );
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Per-service runs replace only their own section
 // ---------------------------------------------------------------------------
