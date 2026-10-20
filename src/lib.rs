@@ -2,6 +2,8 @@ pub mod cli;
 pub mod config;
 pub mod garmin;
 pub mod http;
+pub mod metric;
+pub mod session;
 pub mod timefmt;
 pub mod transform;
 pub mod withings;
@@ -21,6 +23,14 @@ pub const EXIT_AUTH: i32 = 4;
 
 /// Built-in sync window when neither --since/--until nor `sync.since` are
 /// set: the rolling last 24 hours (ADR-0001).
+pub use metric::Metric;
+
+#[derive(Debug)]
+pub enum Fault {
+    Unauthorized,
+    Failed(AppError),
+}
+
 pub const DEFAULT_WINDOW_SECS: i64 = 86400;
 
 #[derive(Debug)]
@@ -53,23 +63,29 @@ impl std::error::Error for AppError {}
 /// Scope membership and the Withings meastype mapping for one run
 /// (ADR-0005).
 impl MetricScope {
-    /// The Withings meastype set this scope requests.
-    fn meastypes(self) -> &'static str {
+    /// Metrics included in this run, in stable report and query order.
+    fn metrics(self) -> Vec<Metric> {
         match self {
-            MetricScope::Weight => withings::WEIGHT_MEASTYPES,
-            MetricScope::Bp => withings::BP_MEASTYPES,
-            MetricScope::All => withings::ALL_MEASTYPES,
+            MetricScope::Weight => vec![Metric::Weight],
+            MetricScope::Bp => vec![Metric::BloodPressure],
+            MetricScope::All => Metric::ALL.to_vec(),
         }
     }
 
-    /// True when this run may touch the weight path.
-    fn includes_weight(self) -> bool {
-        self != MetricScope::Bp
+    /// The Withings meastype set this scope requests.
+    fn meastypes(self) -> String {
+        self.metrics()
+            .iter()
+            .map(|metric| metric.meastypes())
+            .collect::<Vec<_>>()
+            .join(",")
     }
 
-    /// True when this run may touch the blood-pressure path.
+    fn includes_weight(self) -> bool {
+        self.metrics().contains(&Metric::Weight)
+    }
     fn includes_bp(self) -> bool {
-        self != MetricScope::Weight
+        self.metrics().contains(&Metric::BloodPressure)
     }
 }
 
@@ -185,19 +201,8 @@ fn run_auth_withings(client: &http::HttpClient, dir: &Path) -> Result<(), AppErr
     // Load the config if one exists, else start from the skeleton. `auth
     // withings` tolerates empty credentials because it prompts for them next.
     let config_path = config::config_path(dir);
-    let mut config = if config_path.exists() {
-        let text = fs::read_to_string(&config_path).map_err(|error| {
-            AppError::config(format!("could not read {}: {error}", config_path.display()))
-        })?;
-        toml::from_str(&text).map_err(|error| {
-            AppError::config(format!(
-                "invalid config at {}: {error}",
-                config_path.display()
-            ))
-        })?
-    } else {
-        config::Config::skeleton()
-    };
+    let mut config =
+        config::read_config_file(&config_path)?.unwrap_or_else(config::Config::skeleton);
 
     // One-time interactive Withings OAuth (ticket 05).
     if config.withings.client_id.trim().is_empty() {
@@ -303,25 +308,14 @@ fn run_auth_garmin(client: &http::HttpClient, dir: &Path) -> Result<(), AppError
     Ok(())
 }
 
-/// Tokens for one auth run: the existing file when present, else defaults.
-/// A malformed existing file is a config error (never silently overwritten).
-fn load_tokens_or_default(dir: &Path) -> Result<config::Tokens, AppError> {
-    if config::tokens_path(dir).exists() {
-        config::load_tokens(dir)
-    } else {
-        Ok(config::Tokens::default())
-    }
-}
-
-/// Replace one section of the shared `tokens.json` in place, leaving the
-/// other service's section as loaded (ADR-0006, decision 3).
+/// Replace one section of the shared token document in place (ADR-0006).
 fn update_tokens_section<F>(dir: &Path, replace: F) -> Result<(), AppError>
 where
     F: FnOnce(&mut config::Tokens),
 {
-    let mut tokens = load_tokens_or_default(dir)?;
-    replace(&mut tokens);
-    config::write_tokens(&config::tokens_path(dir), &tokens)
+    let mut session = session::Session::load_or_default(dir)?;
+    session.replace(replace);
+    session.persist()
 }
 
 /// Mutable Garmin DI token state for one sync run.
@@ -374,13 +368,19 @@ where
                 Ok(()) => Ok(()),
                 Err(failure) => Err(AppError::new(
                     EXIT_METRIC_FAILURE,
-                    failure.message().to_string(),
+                    match failure {
+                        garmin::WriteFailure::Unauthorized => "unauthorized (HTTP 401)".to_string(),
+                        garmin::WriteFailure::Failed(error) => error.message,
+                    },
                 )),
             }
         }
         Err(failure) => Err(AppError::new(
             EXIT_METRIC_FAILURE,
-            failure.message().to_string(),
+            match failure {
+                garmin::WriteFailure::Unauthorized => "unauthorized (HTTP 401)".to_string(),
+                garmin::WriteFailure::Failed(error) => error.message,
+            },
         )),
     }
 }
@@ -581,8 +581,18 @@ fn run_sync(cli_args: SyncArgs) -> Result<i32, AppError> {
         }
     }
 
-    let weight_bound = MetricBound::resolve(config.sync.weight.since, since_flag, until_flag, now);
-    let bp_bound = MetricBound::resolve(config.sync.bp.since, since_flag, until_flag, now);
+    let weight_bound = MetricBound::resolve(
+        config.sync.floor(Metric::Weight),
+        since_flag,
+        until_flag,
+        now,
+    );
+    let bp_bound = MetricBound::resolve(
+        config.sync.floor(Metric::BloodPressure),
+        since_flag,
+        until_flag,
+        now,
+    );
 
     let window_label = if since_flag.is_none() && until_flag.is_none() {
         match scope {
@@ -637,7 +647,7 @@ fn run_sync(cli_args: SyncArgs) -> Result<i32, AppError> {
             &mut tokens,
             &config.withings.client_id,
             &config.withings.client_secret,
-            |c, t| withings::read_measures(c, t, read_start, until_flag, scope.meastypes()),
+            |c, t| withings::read_measures(c, t, read_start, until_flag, &scope.meastypes()),
         )?;
         groups = read.groups;
         query_ts = Some(read.query_ts);
@@ -673,10 +683,8 @@ fn run_sync(cli_args: SyncArgs) -> Result<i32, AppError> {
     let skips: Vec<transform::Skip> = skips
         .into_iter()
         .filter(|skip| match skip.metric {
-            transform::Metric::Weight => weight_keep_from.is_none_or(|bound| skip.epoch >= bound),
-            transform::Metric::BloodPressure => {
-                bp_keep_from.is_none_or(|bound| skip.epoch >= bound)
-            }
+            Metric::Weight => weight_keep_from.is_none_or(|bound| skip.epoch >= bound),
+            Metric::BloodPressure => bp_keep_from.is_none_or(|bound| skip.epoch >= bound),
         })
         .collect();
 
@@ -684,8 +692,8 @@ fn run_sync(cli_args: SyncArgs) -> Result<i32, AppError> {
         eprintln!(
             "warning: skipping {} reading at {}: {}",
             match skip.metric {
-                transform::Metric::Weight => "weight",
-                transform::Metric::BloodPressure => "blood-pressure",
+                Metric::Weight => "weight",
+                Metric::BloodPressure => "blood-pressure",
             },
             timefmt::local_ms(skip.epoch),
             skip.reason
@@ -742,13 +750,10 @@ fn run_sync(cli_args: SyncArgs) -> Result<i32, AppError> {
     // Weight has no skip path today (transform either emits a reading or
     // stays silent on it), so this count is 0; it keeps the weight report
     // line's "skipped" slot explicit rather than magic.
-    let weight_skips = skips
-        .iter()
-        .filter(|s| s.metric == transform::Metric::Weight)
-        .count();
+    let weight_skips = skips.iter().filter(|s| s.metric == Metric::Weight).count();
     let bp_skips = skips
         .iter()
-        .filter(|s| s.metric == transform::Metric::BloodPressure)
+        .filter(|s| s.metric == Metric::BloodPressure)
         .count();
 
     let mut garmin_state = GarminTokenState {
@@ -829,22 +834,22 @@ fn run_sync(cli_args: SyncArgs) -> Result<i32, AppError> {
     let mut floors_moved: Vec<(&'static str, i64)> = Vec::new();
     if flag_free {
         if let Some(query_ts) = query_ts {
-            if include_weight && weight_failed == 0 {
-                let next = config
-                    .sync
-                    .weight
-                    .since
-                    .map_or(query_ts, |f| f.max(query_ts));
-                if config.sync.weight.since != Some(next) {
-                    config.sync.weight.since = Some(next);
-                    floors_moved.push(("weight", next));
+            for (metric, failed) in [
+                (Metric::Weight, weight_failed),
+                (Metric::BloodPressure, bp_failed),
+            ] {
+                if !scope.metrics().contains(&metric) || failed > 0 {
+                    continue;
                 }
-            }
-            if include_bp && bp_failed == 0 {
-                let next = config.sync.bp.since.map_or(query_ts, |f| f.max(query_ts));
-                if config.sync.bp.since != Some(next) {
-                    config.sync.bp.since = Some(next);
-                    floors_moved.push(("bp", next));
+                if config.sync.advance_floor(metric, query_ts) {
+                    floors_moved.push((
+                        if metric == Metric::Weight {
+                            "weight"
+                        } else {
+                            "bp"
+                        },
+                        query_ts,
+                    ));
                 }
             }
         }

@@ -5,6 +5,7 @@ blood-pressure measurements from Withings and writes them to Garmin Connect.
 
 ## Glossary
 
+- **metric** — one of the two quantities a sync run reads from Withings and writes to Garmin: weight or blood pressure. Each has its own sync floor, Withings meastype set and Garmin write endpoint. Prose uses “blood-pressure”; the CLI subcommand is `bp`.
 - **sync window** — the date range `sync` reads from Withings. Resolved per
   metric by precedence: `--since`/`--until` flags, then that metric's
   machine-updated floor (`sync.weight.since` / `sync.bp.since`), then the

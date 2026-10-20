@@ -30,11 +30,7 @@ pub struct BpReading {
     pub epoch: i64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Metric {
-    Weight,
-    BloodPressure,
-}
+pub use crate::metric::Metric;
 
 /// A reading that was dropped, with a human-readable reason for the report.
 #[derive(Debug, Clone, PartialEq)]

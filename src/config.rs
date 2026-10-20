@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::AppError;
+use crate::{AppError, Metric};
 
 pub const CONFIG_FILE: &str = "config.toml";
 pub const TOKENS_FILE: &str = "tokens.json";
@@ -51,10 +51,31 @@ pub struct SyncConfig {
     pub bp: MetricFloor,
 }
 
-/// One metric's machine-updated sync floor (ADR-0008): the epoch-second
-/// Withings timestamp of the newest measurement already written to Garmin.
-/// Absent = the metric has no floor yet and bootstraps from the rolling
-/// window. The legacy shared `sync.since` key is no longer part of the
+impl SyncConfig {
+    pub fn floor(&self, metric: Metric) -> Option<i64> {
+        match metric {
+            Metric::Weight => self.weight.since,
+            Metric::BloodPressure => self.bp.since,
+        }
+    }
+
+    /// Set a checkpoint monotonically; return true only when it advances.
+    pub fn advance_floor(&mut self, metric: Metric, candidate: i64) -> bool {
+        let floor = match metric {
+            Metric::Weight => &mut self.weight.since,
+            Metric::BloodPressure => &mut self.bp.since,
+        };
+        if floor.is_some_and(|current| current >= candidate) {
+            return false;
+        }
+        *floor = Some(candidate);
+        true
+    }
+}
+
+/// One metric's read-checkpoint floor (ADR-0010): the Withings query timestamp
+/// of the last clean flag-free apply. Everything at or before it is handled.
+/// Absent = the metric has no floor yet and bootstraps from the rolling window. The legacy shared `sync.since` key is no longer part of the
 /// schema; if present in an existing file it is ignored.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct MetricFloor {
@@ -211,22 +232,34 @@ pub fn tokens_path(dir: &Path) -> PathBuf {
     dir.join(TOKENS_FILE)
 }
 
+pub fn read_config_file(path: &Path) -> Result<Option<Config>, AppError> {
+    if !path.exists() {
+        return Ok(None);
+    }
+    let text = fs::read_to_string(path)
+        .map_err(|error| AppError::config(format!("could not read {}: {error}", path.display())))?;
+    toml::from_str(&text)
+        .map(Some)
+        .map_err(|error| AppError::config(format!("invalid config at {}: {error}", path.display())))
+}
+
 pub fn load_config(dir: &Path) -> Result<Config, AppError> {
     let path = config_path(dir);
-    let text = fs::read_to_string(&path).map_err(|_| {
-        AppError::config(format!(
-            "config not found at {}; run `auth` first",
-            path.display()
-        ))
-    })?;
-
-    let config: Config = toml::from_str(&text).map_err(|error| {
-        AppError::config(format!(
-            "invalid config at {}: {}; run `auth` first",
-            path.display(),
-            error
-        ))
-    })?;
+    let config = read_config_file(&path)
+        .map_err(|error| {
+            let message = error.message.clone();
+            if message.starts_with("invalid config at ") {
+                AppError::config(format!("{message}; run `auth` first"))
+            } else {
+                error
+            }
+        })?
+        .ok_or_else(|| {
+            AppError::config(format!(
+                "config not found at {}; run `auth` first",
+                path.display()
+            ))
+        })?;
 
     if config.withings.client_id.trim().is_empty()
         || config.withings.client_secret.trim().is_empty()
@@ -311,9 +344,7 @@ mod tests {
     const MIDNIGHT: i64 = 1767312000;
 
     fn parse(text: &str) -> Config {
-        let full = format!(
-            "[withings]\nclient_id = \"test\"\nclient_secret = \"test\"\n{text}"
-        );
+        let full = format!("[withings]\nclient_id = \"test\"\nclient_secret = \"test\"\n{text}");
         toml::from_str(&full).unwrap()
     }
 

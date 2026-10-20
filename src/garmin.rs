@@ -182,26 +182,20 @@ pub fn bp_payload(
     payload
 }
 
-/// Failure writing to Garmin Connect: either the token was rejected (the
-/// caller refreshes once and retries), or the write failed for another
-/// reason.
-#[derive(Debug)]
-pub enum WriteFailure {
-    Unauthorized,
-    Failed(AppError),
-}
-
-impl WriteFailure {
-    pub fn message(&self) -> &str {
-        match self {
-            WriteFailure::Unauthorized => "unauthorized (HTTP 401)",
-            WriteFailure::Failed(error) => &error.message,
-        }
-    }
-}
+pub use crate::Fault as WriteFailure;
 
 /// Garmin rate-limiting: HTTP status 429, or a JSON body whose
 /// `error.status-code` is `429` (string or number).
+fn retry_garmin<E>(
+    operation: impl FnMut() -> Result<(u16, String), E>,
+) -> Result<(u16, String), E> {
+    crate::http::retry(
+        3,
+        |(status, body)| is_rate_limited(*status, body),
+        operation,
+    )
+}
+
 fn is_rate_limited(status: u16, body: &str) -> bool {
     if status == 429 {
         return true;
@@ -238,18 +232,14 @@ pub fn write_json(
     // Adding it again would put the header on the wire twice, and Garmin's
     // edge rejects the duplicate with an empty-body 400 (ticket 11).
 
-    let (status, body) = crate::http::retry(
-        3,
-        |(status, body): &(u16, String)| is_rate_limited(*status, body),
-        || {
-            client.post_json(&url, payload, &headers).map_err(|error| {
-                WriteFailure::Failed(AppError::new(
-                    crate::EXIT_METRIC_FAILURE,
-                    format!("write to Garmin {path} failed: {error}"),
-                ))
-            })
-        },
-    )?;
+    let (status, body) = retry_garmin(|| {
+        client.post_json(&url, payload, &headers).map_err(|error| {
+            WriteFailure::Failed(AppError::new(
+                crate::EXIT_METRIC_FAILURE,
+                format!("write to Garmin {path} failed: {error}"),
+            ))
+        })
+    })?;
     if is_rate_limited(status, &body) {
         // Retries exhausted while still rate-limited (possibly a 200 whose
         // JSON body carries a 429) — this write did not succeed.
@@ -340,19 +330,15 @@ pub fn login(
         ));
     }
 
-    let (status, body) = crate::http::retry(
-        3,
-        |(status, body): &(u16, String)| is_rate_limited(*status, body),
-        || {
-            client
-                .post_json(
-                    &login_url(&client.base.garmin_sso),
-                    &login_json(username, password),
-                    &sso_headers,
-                )
-                .map_err(transport_error)
-        },
-    )?;
+    let (status, body) = retry_garmin(|| {
+        client
+            .post_json(
+                &login_url(&client.base.garmin_sso),
+                &login_json(username, password),
+                &sso_headers,
+            )
+            .map_err(transport_error)
+    })?;
     let body = sso_json(status, &body, "login")?;
 
     let response_type = body
@@ -392,19 +378,15 @@ pub fn login(
 
 /// One MFA verify attempt. `InvalidCode` means the operator gets to try again.
 pub fn verify_mfa(client: &HttpClient, method: &str, code: &str) -> Result<MfaOutcome, AppError> {
-    let (status, body) = crate::http::retry(
-        3,
-        |(status, body): &(u16, String)| is_rate_limited(*status, body),
-        || {
-            client
-                .post_json(
-                    &mfa_url(&client.base.garmin_sso),
-                    &verify_json(method, code),
-                    &sso_headers(),
-                )
-                .map_err(transport_error)
-        },
-    )?;
+    let (status, body) = retry_garmin(|| {
+        client
+            .post_json(
+                &mfa_url(&client.base.garmin_sso),
+                &verify_json(method, code),
+                &sso_headers(),
+            )
+            .map_err(transport_error)
+    })?;
     let body = sso_json(status, &body, "MFA verification")?;
 
     let response_type = body
@@ -433,20 +415,16 @@ pub fn exchange_service_ticket(client: &HttpClient, ticket: &str) -> Result<DiTo
     let mut last_error: Option<String> = None;
     for candidate in DI_CLIENT_IDS {
         let url = client.garmin_diauth_url(DI_TOKEN_PATH);
-        let (status, body) = crate::http::retry(
-            3,
-            |(status, body): &(u16, String)| is_rate_limited(*status, body),
-            || {
-                client
-                    .post_form_headers(
-                        &url,
-                        &token_form(candidate, ticket),
-                        &native_headers(),
-                        Some((candidate, "")),
-                    )
-                    .map_err(transport_error)
-            },
-        )?;
+        let (status, body) = retry_garmin(|| {
+            client
+                .post_form_headers(
+                    &url,
+                    &token_form(candidate, ticket),
+                    &native_headers(),
+                    Some((candidate, "")),
+                )
+                .map_err(transport_error)
+        })?;
         if is_rate_limited(status, &body) {
             // Rate limiting ends the retry walk immediately.
             return Err(AppError::new(
@@ -482,20 +460,16 @@ pub fn refresh(
         ));
     }
     let url = client.garmin_diauth_url(DI_TOKEN_PATH);
-    let (status, body) = crate::http::retry(
-        3,
-        |(status, body): &(u16, String)| is_rate_limited(*status, body),
-        || {
-            client
-                .post_form_headers(
-                    &url,
-                    &refresh_form(client_id, refresh_token),
-                    &native_headers(),
-                    Some((client_id, "")),
-                )
-                .map_err(transport_error)
-        },
-    )?;
+    let (status, body) = retry_garmin(|| {
+        client
+            .post_form_headers(
+                &url,
+                &refresh_form(client_id, refresh_token),
+                &native_headers(),
+                Some((client_id, "")),
+            )
+            .map_err(transport_error)
+    })?;
     parse_di_response(status, &body, client_id)
 }
 

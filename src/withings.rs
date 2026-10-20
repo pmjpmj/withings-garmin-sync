@@ -19,13 +19,6 @@ pub const REDIRECT_URI: &str = "http://localhost:8765/";
 const TOKEN_PATH: &str = "/v2/oauth2";
 const MEASURE_PATH: &str = "/measure";
 
-/// meastype code the CLI reads for weight: 1 = weight (kg).
-pub const WEIGHT_MEASTYPES: &str = "1";
-/// meastype codes the CLI reads for blood pressure: 9 = diastolic, 10 =
-/// systolic, 11 = pulse.
-pub const BP_MEASTYPES: &str = "9,10,11";
-/// Every meastype code the CLI reads.
-pub const ALL_MEASTYPES: &str = "1,9,10,11";
 /// Safety cap on pagination, so a misbehaving `more` cannot loop forever.
 const MAX_PAGES: usize = 50;
 
@@ -63,23 +56,7 @@ fn post_with_601_retry<T>(
     crate::http::retry(3, |(status, _)| is_rate_limited(*status), operation)
 }
 
-/// Failure reading from Withings: either the token was rejected (the
-/// caller refreshes once and retries, ADR-0007), or the read failed for
-/// another reason.
-#[derive(Debug)]
-pub enum ReadFailure {
-    Unauthorized,
-    Failed(AppError),
-}
-
-impl ReadFailure {
-    pub fn message(&self) -> &str {
-        match self {
-            ReadFailure::Unauthorized => "unauthorized (HTTP 401/403 or body status 401)",
-            ReadFailure::Failed(error) => &error.message,
-        }
-    }
-}
+pub use crate::Fault as ReadFailure;
 
 /// One measurement-window read from Withings: the measure groups plus the
 /// Withings query timestamp (ADR-0010). Clean flag-free applies advance
