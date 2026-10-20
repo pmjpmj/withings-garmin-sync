@@ -1,3 +1,8 @@
+## Code quality
+
+- After making code changes, run `cargo fmt` and `cargo clippy --all-targets` and fix any issues before finishing.
+- Commit messages must follow the [Conventional Commits](https://www.conventionalcommits.org/) spec (e.g. `feat: ...`, `fix: ...`, `chore: ...`).
+
 ## Agent skills
 
 ### Issue tracker
