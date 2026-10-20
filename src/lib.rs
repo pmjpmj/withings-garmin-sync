@@ -9,7 +9,7 @@ pub mod transform;
 pub mod withings;
 
 use std::fs;
-use std::io::Write;
+use std::io::{IsTerminal, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 
@@ -205,7 +205,7 @@ fn run_auth_withings(client: &http::HttpClient, dir: &Path) -> Result<(), AppErr
         )?;
     }
     if config.withings.client_secret.trim().is_empty() {
-        config.withings.client_secret = prompt_line(
+        config.withings.client_secret = prompt_secret(
             "Withings client secret (from the Withings developer portal): ",
             "auth withings",
         )?;
@@ -259,7 +259,7 @@ fn run_auth_withings(client: &http::HttpClient, dir: &Path) -> Result<(), AppErr
 fn run_auth_garmin(client: &http::HttpClient, dir: &Path) -> Result<(), AppError> {
     // One-time interactive Garmin mobile-SSO login (ticket 06).
     let username = prompt_line("Garmin username (email): ", "auth garmin")?;
-    let password = prompt_line("Garmin password: ", "auth garmin")?;
+    let password = prompt_secret("Garmin password: ", "auth garmin")?;
     let service_ticket = match garmin::login(client, &username, &password)? {
         garmin::LoginOutcome::Success { service_ticket } => service_ticket,
         garmin::LoginOutcome::MfaRequired { method } => {
@@ -272,7 +272,7 @@ fn run_auth_garmin(client: &http::HttpClient, dir: &Path) -> Result<(), AppError
                         "too many rejected MFA codes; re-run `auth garmin` to try again",
                     ));
                 }
-                let code = prompt_line(
+                let code = prompt_secret(
                     &format!("Garmin MFA code (sent via {method}): "),
                     "auth garmin",
                 )?;
@@ -321,6 +321,40 @@ fn prompt_line(label: &str, retry: &str) -> Result<String, AppError> {
     std::io::stdin()
         .read_line(&mut line)
         .map_err(|error| AppError::new(EXIT_AUTH, format!("could not read input: {error}")))?;
+    let trimmed = line.trim().to_string();
+    if trimmed.is_empty() {
+        return Err(AppError::new(
+            EXIT_AUTH,
+            format!("no input provided (stdin closed); re-run `{retry}` to continue"),
+        ));
+    }
+    Ok(trimmed)
+}
+
+/// Read a secret without exposing it on a terminal. Piped input stays
+/// scriptable and is explicitly reported as unmasked on stderr.
+fn prompt_secret(label: &str, retry: &str) -> Result<String, AppError> {
+    let input = std::io::stdin();
+    if input.is_terminal() {
+        let config = rpassword::ConfigBuilder::new()
+            .password_feedback_mask('*')
+            .build();
+        let secret = rpassword::prompt_password_with_config(label, config)
+            .map_err(|error| AppError::new(EXIT_AUTH, format!("could not read input: {error}")))?;
+        return validate_prompt_input(secret, retry);
+    }
+
+    eprint!("{label}");
+    eprintln!("\nauth: stdin is not a terminal; input is being read unmasked");
+    std::io::stderr().flush().ok();
+    let mut line = String::new();
+    input
+        .read_line(&mut line)
+        .map_err(|error| AppError::new(EXIT_AUTH, format!("could not read input: {error}")))?;
+    validate_prompt_input(line, retry)
+}
+
+fn validate_prompt_input(line: String, retry: &str) -> Result<String, AppError> {
     let trimmed = line.trim().to_string();
     if trimmed.is_empty() {
         return Err(AppError::new(

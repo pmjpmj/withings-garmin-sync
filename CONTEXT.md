@@ -45,6 +45,10 @@ blood-pressure measurements from Withings and writes them to Garmin Connect.
   version; the pipeline verifies it and hard-fails on mismatch. Version
   bumps happen on `main` before tagging; the pipeline never edits the
   manifest.
+- **secret** — credential material that must never appear in logs or
+  error output: passwords, client secrets, OAuth tokens (access and
+  refresh), CAS service tickets, and authorization codes. Redacted as
+  `[REDACTED]` wherever it would be printed.
 - **per-service auth** — re-authenticating one service without the other:
   `auth withings` or `auth garmin`. Bare `auth` authenticates both (the
   first-run path). Each command replaces only its own section of
