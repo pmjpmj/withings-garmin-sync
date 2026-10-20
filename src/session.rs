@@ -56,6 +56,77 @@ impl Session {
         {
             return Ok(());
         }
+        self.refresh_withings(client, client_id, client_secret)
+    }
+
+    pub fn recover_withings<T>(
+        &mut self,
+        client: &crate::http::HttpClient,
+        client_id: &str,
+        client_secret: &str,
+        mut operation: impl FnMut(&str) -> Result<T, crate::Fault>,
+    ) -> Result<T, AppError> {
+        match operation(&self.tokens.withings.access_token) {
+            Ok(value) => Ok(value),
+            Err(crate::Fault::Failed(error)) => Err(error),
+            Err(crate::Fault::Unauthorized) => {
+                self.refresh_withings(client, client_id, client_secret)?;
+                match operation(&self.tokens.withings.access_token) {
+                    Ok(value) => Ok(value),
+                    Err(crate::Fault::Failed(error)) => Err(error),
+                    Err(crate::Fault::Unauthorized) => Err(AppError::new(
+                        crate::EXIT_AUTH,
+                        "token refresh succeeded but Withings still rejected the token; re-run `auth withings`",
+                    )),
+                }
+            }
+        }
+    }
+
+    pub fn recover_garmin<T>(
+        &mut self,
+        client: &crate::http::HttpClient,
+        mut operation: impl FnMut(&str) -> Result<T, crate::Fault>,
+    ) -> Result<T, AppError> {
+        match operation(&self.tokens.garmin.access_token) {
+            Ok(value) => Ok(value),
+            Err(crate::Fault::Failed(error)) => Err(error),
+            Err(crate::Fault::Unauthorized) => {
+                let client_id = self.tokens.garmin.client_id.clone().unwrap_or_default();
+                let refreshed =
+                    crate::garmin::refresh(client, &client_id, &self.tokens.garmin.refresh_token)
+                        .map_err(|error| {
+                        AppError::new(
+                            crate::EXIT_AUTH,
+                            format!(
+                                "Garmin token refresh failed: {}; re-run `auth garmin`",
+                                error.message
+                            ),
+                        )
+                    })?;
+                self.tokens.garmin.access_token = refreshed.access_token;
+                if let Some(rotate) = refreshed.refresh_token {
+                    self.tokens.garmin.refresh_token = rotate;
+                }
+                self.persist()?;
+                match operation(&self.tokens.garmin.access_token) {
+                    Ok(value) => Ok(value),
+                    Err(crate::Fault::Unauthorized) => Err(AppError::new(
+                        crate::EXIT_METRIC_FAILURE,
+                        "unauthorized (HTTP 401)",
+                    )),
+                    Err(crate::Fault::Failed(error)) => Err(error),
+                }
+            }
+        }
+    }
+
+    fn refresh_withings(
+        &mut self,
+        client: &crate::http::HttpClient,
+        client_id: &str,
+        client_secret: &str,
+    ) -> Result<(), AppError> {
         let refreshed = crate::withings::refresh(
             client,
             client_id,

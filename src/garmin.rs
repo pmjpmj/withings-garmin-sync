@@ -474,18 +474,12 @@ pub fn refresh(
 }
 
 fn parse_di_response(status: u16, body: &str, client_id: &str) -> Result<DiTokens, AppError> {
-    if !(200..300).contains(&status) {
-        return Err(AppError::new(
-            crate::EXIT_AUTH,
-            format!("DI token endpoint returned HTTP {status} for {client_id}"),
-        ));
-    }
-    let json: serde_json::Value = serde_json::from_str(body).map_err(|error| {
-        AppError::new(
-            crate::EXIT_AUTH,
-            format!("DI token endpoint returned invalid JSON: {error}"),
-        )
-    })?;
+    let json = status_then_json(
+        status,
+        body,
+        &format!("DI token endpoint returned HTTP {status} for {client_id}"),
+        "DI token endpoint returned invalid JSON",
+    )?;
     let access_token = json
         .get("access_token")
         .and_then(|v| v.as_str())
@@ -516,18 +510,12 @@ fn sso_json(status: u16, body: &str, what: &str) -> Result<serde_json::Value, Ap
             format!("Garmin {what} was rate-limited (HTTP 429); try again later"),
         ));
     }
-    if !(200..300).contains(&status) {
-        return Err(AppError::new(
-            crate::EXIT_AUTH,
-            format!("Garmin {what} returned HTTP {status}"),
-        ));
-    }
-    let json: serde_json::Value = serde_json::from_str(body).map_err(|error| {
-        AppError::new(
-            crate::EXIT_AUTH,
-            format!("Garmin {what} returned invalid JSON: {error}"),
-        )
-    })?;
+    let json = status_then_json(
+        status,
+        body,
+        &format!("Garmin {what} returned HTTP {status}"),
+        &format!("Garmin {what} returned invalid JSON"),
+    )?;
     let json_429 = json
         .pointer("/error/status-code")
         .map(|v| v.as_str() == Some("429") || v.as_u64() == Some(429))
@@ -539,6 +527,19 @@ fn sso_json(status: u16, body: &str, what: &str) -> Result<serde_json::Value, Ap
         ));
     }
     Ok(json)
+}
+
+fn status_then_json(
+    status: u16,
+    body: &str,
+    http_error: &str,
+    json_error: &str,
+) -> Result<serde_json::Value, AppError> {
+    if !(200..300).contains(&status) {
+        return Err(AppError::new(crate::EXIT_AUTH, http_error));
+    }
+    serde_json::from_str(body)
+        .map_err(|error| AppError::new(crate::EXIT_AUTH, format!("{json_error}: {error}")))
 }
 
 fn transport_error(error: HttpError) -> AppError {
