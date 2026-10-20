@@ -8,3 +8,7 @@
 .scratch/withings-garmin-sync/spike/cookies.txt
 .scratch/withings-garmin-sync/spike/*.json
 .scratch/withings-garmin-sync/spike/transcript.log
+
+# agent skills
+/.agents/
+/.claude/
