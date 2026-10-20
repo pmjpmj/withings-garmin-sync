@@ -41,10 +41,7 @@ pub struct AppError {
 
 impl AppError {
     pub fn new(code: i32, message: impl Into<String>) -> Self {
-        Self {
-            code,
-            message: message.into(),
-        }
+        Self { code, message: message.into() }
     }
 
     pub fn config(message: impl Into<String>) -> Self {
@@ -74,11 +71,7 @@ impl MetricScope {
 
     /// The Withings meastype set this scope requests.
     fn meastypes(self) -> String {
-        self.metrics()
-            .iter()
-            .map(|metric| metric.meastypes())
-            .collect::<Vec<_>>()
-            .join(",")
+        self.metrics().iter().map(|metric| metric.meastypes()).collect::<Vec<_>>().join(",")
     }
 }
 
@@ -104,27 +97,15 @@ impl MetricBound {
         if let Some(since) = since_flag {
             // An explicit flag bounds the window by itself (ADR-0001); the
             // floor plays no part and nothing is filtered client-side.
-            return MetricBound {
-                epoch: since,
-                keep_from: None,
-            };
+            return MetricBound { epoch: since, keep_from: None };
         }
         if until_flag.is_some() {
             // `--until` alone means "from the beginning" (ADR-0001).
-            return MetricBound {
-                epoch: 0,
-                keep_from: None,
-            };
+            return MetricBound { epoch: 0, keep_from: None };
         }
         match floor {
-            Some(floor) => MetricBound {
-                epoch: floor + 1,
-                keep_from: Some(floor + 1),
-            },
-            None => MetricBound {
-                epoch: now - DEFAULT_WINDOW_SECS,
-                keep_from: None,
-            },
+            Some(floor) => MetricBound { epoch: floor + 1, keep_from: Some(floor + 1) },
+            None => MetricBound { epoch: now - DEFAULT_WINDOW_SECS, keep_from: None },
         }
     }
 }
@@ -159,10 +140,7 @@ fn run_auth(args: AuthArgs) -> Result<i32, AppError> {
         AppError::config(format!("could not create {}: {error}", dir.display()))
     })?;
     fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).map_err(|error| {
-        AppError::config(format!(
-            "could not set 0700 permissions on {}: {error}",
-            dir.display()
-        ))
+        AppError::config(format!("could not set 0700 permissions on {}: {error}", dir.display()))
     })?;
 
     let client = http::HttpClient::new(http::BaseUrls::from_env()).with_verbose(options.verbose);
@@ -336,9 +314,7 @@ fn prompt_line(label: &str, retry: &str) -> Result<String, AppError> {
 fn prompt_secret(label: &str, retry: &str) -> Result<String, AppError> {
     let input = std::io::stdin();
     if input.is_terminal() {
-        let config = rpassword::ConfigBuilder::new()
-            .password_feedback_mask('*')
-            .build();
+        let config = rpassword::ConfigBuilder::new().password_feedback_mask('*').build();
         let secret = rpassword::prompt_password_with_config(label, config)
             .map_err(|error| AppError::new(EXIT_AUTH, format!("could not read input: {error}")))?;
         return validate_prompt_input(secret, retry);
@@ -384,13 +360,7 @@ fn run_sync(cli_args: SyncArgs) -> Result<i32, AppError> {
     let tokens = session.tokens();
     if tokens.withings.access_token.trim().is_empty()
         || tokens.garmin.access_token.trim().is_empty()
-        || tokens
-            .garmin
-            .client_id
-            .as_deref()
-            .unwrap_or("")
-            .trim()
-            .is_empty()
+        || tokens.garmin.client_id.as_deref().unwrap_or("").trim().is_empty()
     {
         return Err(AppError::config(format!(
             "tokens at {} are incomplete; run `auth` first",
@@ -423,13 +393,13 @@ fn run_sync(cli_args: SyncArgs) -> Result<i32, AppError> {
     let until_flag = args.until.as_deref().map(timefmt::parse_date).transpose()?;
     let until = until_flag.unwrap_or(now);
     let since_flag = args.since.as_deref().map(timefmt::parse_date).transpose()?;
-    if let (Some(since), Some(until)) = (since_flag, until_flag) {
-        if since > until {
-            return Err(AppError::new(
-                EXIT_USAGE,
-                format!("invalid window: --since {since} is after --until {until}"),
-            ));
-        }
+    if let (Some(since), Some(until)) = (since_flag, until_flag)
+        && since > until
+    {
+        return Err(AppError::new(
+            EXIT_USAGE,
+            format!("invalid window: --since {since} is after --until {until}"),
+        ));
     }
 
     // A stored floor ahead of the local clock never advances: the monotonic
@@ -439,12 +409,7 @@ fn run_sync(cli_args: SyncArgs) -> Result<i32, AppError> {
     // floor, so warn up front — scoped to the metrics this run touches
     // (ADR-0005) — instead of failing silently.
     for (name, key, floor, included) in [
-        (
-            "weight",
-            "sync.weight.since",
-            config.sync.weight.since,
-            include_weight,
-        ),
+        ("weight", "sync.weight.since", config.sync.weight.since, include_weight),
         ("bp", "sync.bp.since", config.sync.bp.since, include_bp),
     ] {
         if !included {
@@ -462,18 +427,10 @@ fn run_sync(cli_args: SyncArgs) -> Result<i32, AppError> {
         }
     }
 
-    let weight_bound = MetricBound::resolve(
-        config.sync.floor(Metric::Weight),
-        since_flag,
-        until_flag,
-        now,
-    );
-    let bp_bound = MetricBound::resolve(
-        config.sync.floor(Metric::BloodPressure),
-        since_flag,
-        until_flag,
-        now,
-    );
+    let weight_bound =
+        MetricBound::resolve(config.sync.floor(Metric::Weight), since_flag, until_flag, now);
+    let bp_bound =
+        MetricBound::resolve(config.sync.floor(Metric::BloodPressure), since_flag, until_flag, now);
 
     let window_label = if since_flag.is_none() && until_flag.is_none() {
         match scope {
@@ -492,11 +449,9 @@ fn run_sync(cli_args: SyncArgs) -> Result<i32, AppError> {
         }
     } else {
         match (since_flag, until_flag) {
-            (Some(_), Some(_)) => format!(
-                "{}..{}",
-                args.since.as_deref().unwrap(),
-                args.until.as_deref().unwrap()
-            ),
+            (Some(_), Some(_)) => {
+                format!("{}..{}", args.since.as_deref().unwrap(), args.until.as_deref().unwrap())
+            }
             (Some(_), None) => format!("{}..now", args.since.as_deref().unwrap()),
             (None, Some(_)) => format!("..{}", args.until.as_deref().unwrap()),
             (None, None) => "last 24 hours".to_string(),
@@ -544,9 +499,7 @@ fn run_sync(cli_args: SyncArgs) -> Result<i32, AppError> {
         None
     };
     let bp_keep_from = if include_bp {
-        bp_bound
-            .keep_from
-            .or_else(|| (bp_bound.epoch > read_start).then_some(bp_bound.epoch))
+        bp_bound.keep_from.or_else(|| (bp_bound.epoch > read_start).then_some(bp_bound.epoch))
     } else {
         None
     };
@@ -554,10 +507,8 @@ fn run_sync(cli_args: SyncArgs) -> Result<i32, AppError> {
         .into_iter()
         .filter(|w| weight_keep_from.is_none_or(|bound| w.epoch >= bound))
         .collect();
-    let bps: Vec<transform::BpReading> = bps
-        .into_iter()
-        .filter(|b| bp_keep_from.is_none_or(|bound| b.epoch >= bound))
-        .collect();
+    let bps: Vec<transform::BpReading> =
+        bps.into_iter().filter(|b| bp_keep_from.is_none_or(|bound| b.epoch >= bound)).collect();
     let skips: Vec<transform::Skip> = skips
         .into_iter()
         .filter(|skip| match skip.metric {
@@ -595,17 +546,10 @@ fn run_sync(cli_args: SyncArgs) -> Result<i32, AppError> {
             ),
         }
         for weight in &weights {
-            println!(
-                "  weight: {} kg at {}",
-                weight.kg,
-                timefmt::local_ms(weight.epoch)
-            );
+            println!("  weight: {} kg at {}", weight.kg, timefmt::local_ms(weight.epoch));
         }
         for bp in &bps {
-            let pulse_part = bp
-                .pulse
-                .map(|p| format!(" (pulse {p})"))
-                .unwrap_or_default();
+            let pulse_part = bp.pulse.map(|p| format!(" (pulse {p})")).unwrap_or_default();
             println!(
                 "  blood-pressure: {}/{}{} at {}",
                 bp.systolic,
@@ -629,10 +573,7 @@ fn run_sync(cli_args: SyncArgs) -> Result<i32, AppError> {
     // stays silent on it), so this count is 0; it keeps the weight report
     // line's "skipped" slot explicit rather than magic.
     let weight_skips = skips.iter().filter(|s| s.metric == Metric::Weight).count();
-    let bp_skips = skips
-        .iter()
-        .filter(|s| s.metric == Metric::BloodPressure)
-        .count();
+    let bp_skips = skips.iter().filter(|s| s.metric == Metric::BloodPressure).count();
 
     let mut weight_failed = 0usize;
     let mut bp_failed = 0usize;
@@ -662,9 +603,9 @@ fn run_sync(cli_args: SyncArgs) -> Result<i32, AppError> {
                 bp.diastolic,
                 bp.pulse,
             );
-            match session.recover_garmin(&client, |t| {
-                garmin::write_blood_pressure(&client, t, &payload)
-            }) {
+            match session
+                .recover_garmin(&client, |t| garmin::write_blood_pressure(&client, t, &payload))
+            {
                 Ok(()) => {}
                 Err(error) if error.code == EXIT_AUTH => return Err(error),
                 Err(error) => {
@@ -692,37 +633,28 @@ fn run_sync(cli_args: SyncArgs) -> Result<i32, AppError> {
     // without changing the run's reported outcome.
     let flag_free = since_flag.is_none() && until_flag.is_none();
     let mut floors_moved: Vec<(&'static str, i64)> = Vec::new();
-    if flag_free {
-        if let Some(query_ts) = query_ts {
-            for (metric, failed) in [
-                (Metric::Weight, weight_failed),
-                (Metric::BloodPressure, bp_failed),
-            ] {
-                if !scope.metrics().contains(&metric) || failed > 0 {
-                    continue;
-                }
-                if config.sync.advance_floor(metric, query_ts) {
-                    floors_moved.push((
-                        if metric == Metric::Weight {
-                            "weight"
-                        } else {
-                            "bp"
-                        },
-                        query_ts,
-                    ));
-                }
+    if flag_free && let Some(query_ts) = query_ts {
+        for (metric, failed) in
+            [(Metric::Weight, weight_failed), (Metric::BloodPressure, bp_failed)]
+        {
+            if !scope.metrics().contains(&metric) || failed > 0 {
+                continue;
+            }
+            if config.sync.advance_floor(metric, query_ts) {
+                floors_moved
+                    .push((if metric == Metric::Weight { "weight" } else { "bp" }, query_ts));
             }
         }
     }
-    if !floors_moved.is_empty() {
-        if let Err(error) = config::write_config(&config::config_path(&dir), &config) {
-            eprintln!(
-                "warning: could not write config after the apply: {}; \
+    if !floors_moved.is_empty()
+        && let Err(error) = config::write_config(&config::config_path(&dir), &config)
+    {
+        eprintln!(
+            "warning: could not write config after the apply: {}; \
                  the sync floors did not advance and the next run may re-read this window",
-                error.message
-            );
-            floors_moved.clear();
-        }
+            error.message
+        );
+        floors_moved.clear();
     }
     // The report notes an advancement per metric, only when that metric's
     // floor actually moved and was persisted (ADR-0010).

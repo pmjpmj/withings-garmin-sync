@@ -5,8 +5,8 @@
 //! exchange and refresh both happen at `POST /v2/oauth2` with
 //! `action=requesttoken`; `grant_type` selects the operation.
 
-use crate::http::{HttpClient, HttpError};
 use crate::AppError;
+use crate::http::{HttpClient, HttpError};
 
 /// Host of the Withings OAuth authorize page. Not covered by the
 /// `WGS_*_BASE` seam overrides because the CLI only *prints* this URL — it
@@ -259,10 +259,7 @@ pub fn extract_code(pasted: &str, state: &str) -> Result<String, AppError> {
     let end = rest.find(['&', '#']).unwrap_or(rest.len());
     let code = rest[..end].trim();
     if code.is_empty() {
-        return Err(AppError::new(
-            crate::EXIT_AUTH,
-            "the pasted redirect URL contains no code",
-        ));
+        return Err(AppError::new(crate::EXIT_AUTH, "the pasted redirect URL contains no code"));
     }
     Ok(code.to_string())
 }
@@ -340,10 +337,7 @@ pub fn refresh(
 }
 
 fn map_transport_error(error: HttpError) -> AppError {
-    AppError::new(
-        crate::EXIT_AUTH,
-        format!("could not reach the Withings token endpoint: {error}"),
-    )
+    AppError::new(crate::EXIT_AUTH, format!("could not reach the Withings token endpoint: {error}"))
 }
 
 fn parse_token_response(status: u16, body: &str) -> Result<TokenResponse, AppError> {
@@ -366,20 +360,14 @@ fn parse_token_response(status: u16, body: &str) -> Result<TokenResponse, AppErr
     }
 
     let body = json.get("body").ok_or_else(|| {
-        AppError::new(
-            crate::EXIT_AUTH,
-            "Withings token response was missing its body",
-        )
+        AppError::new(crate::EXIT_AUTH, "Withings token response was missing its body")
     })?;
     let access_token = body
         .get("access_token")
         .and_then(|v| v.as_str())
         .filter(|v| !v.is_empty())
         .ok_or_else(|| {
-            AppError::new(
-                crate::EXIT_AUTH,
-                "Withings token response had no access_token",
-            )
+            AppError::new(crate::EXIT_AUTH, "Withings token response had no access_token")
         })?
         .to_string();
     let refresh_token = body
@@ -387,21 +375,11 @@ fn parse_token_response(status: u16, body: &str) -> Result<TokenResponse, AppErr
         .and_then(|v| v.as_str())
         .filter(|v| !v.is_empty())
         .map(str::to_string);
-    let expires_in = body
-        .get("expires_in")
-        .and_then(|v| v.as_u64())
-        .ok_or_else(|| {
-            AppError::new(
-                crate::EXIT_AUTH,
-                "Withings token response had no expires_in",
-            )
-        })?;
+    let expires_in = body.get("expires_in").and_then(|v| v.as_u64()).ok_or_else(|| {
+        AppError::new(crate::EXIT_AUTH, "Withings token response had no expires_in")
+    })?;
 
-    Ok(TokenResponse {
-        access_token,
-        refresh_token,
-        expires_in,
-    })
+    Ok(TokenResponse { access_token, refresh_token, expires_in })
 }
 
 fn withings_error(status: i64) -> AppError {
@@ -411,10 +389,7 @@ fn withings_error(status: i64) -> AppError {
             .to_string(),
         other => format!("the Withings token request failed (status {other})"),
     };
-    AppError::new(
-        crate::EXIT_AUTH,
-        format!("Withings rejected the request: {message}"),
-    )
+    AppError::new(crate::EXIT_AUTH, format!("Withings rejected the request: {message}"))
 }
 
 #[cfg(test)]

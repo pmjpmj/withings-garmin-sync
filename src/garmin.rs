@@ -17,8 +17,8 @@
 //!
 //! Refresh uses the same token endpoint with `grant_type=refresh_token`.
 
-use crate::http::{query_encode, redact_body, HttpClient, HttpError};
 use crate::AppError;
+use crate::http::{HttpClient, HttpError, query_encode, redact_body};
 
 pub const MOBILE_SSO_CLIENT_ID: &str = "GCM_ANDROID_DARK";
 pub const MOBILE_SSO_SERVICE_URL: &str = "https://mobile.integration.garmin.com/gcm/android";
@@ -60,10 +60,7 @@ pub fn native_headers() -> [(&'static str, &'static str); 9] {
 fn sso_headers() -> [(&'static str, &'static str); 3] {
     [
         ("User-Agent", MOBILE_SSO_USER_AGENT),
-        (
-            "Accept",
-            "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        ),
+        ("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"),
         ("Accept-Language", "en-US,en;q=0.9"),
     ]
 }
@@ -189,11 +186,7 @@ pub use crate::Fault as WriteFailure;
 fn retry_garmin<E>(
     operation: impl FnMut() -> Result<(u16, String), E>,
 ) -> Result<(u16, String), E> {
-    crate::http::retry(
-        3,
-        |(status, body)| is_rate_limited(*status, body),
-        operation,
-    )
+    crate::http::retry(3, |(status, body)| is_rate_limited(*status, body), operation)
 }
 
 fn is_rate_limited(status: u16, body: &str) -> bool {
@@ -320,9 +313,8 @@ pub fn login(
     password: &str,
 ) -> Result<LoginOutcome, AppError> {
     let sso_headers = sso_headers();
-    let (status, _body) = client
-        .get(&sign_in_url(&client.base.garmin_sso), &sso_headers)
-        .map_err(transport_error)?;
+    let (status, _body) =
+        client.get(&sign_in_url(&client.base.garmin_sso), &sso_headers).map_err(transport_error)?;
     if !(200..300).contains(&status) {
         return Err(AppError::new(
             crate::EXIT_AUTH,
@@ -341,15 +333,10 @@ pub fn login(
     })?;
     let body = sso_json(status, &body, "login")?;
 
-    let response_type = body
-        .pointer("/responseStatus/type")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
+    let response_type = body.pointer("/responseStatus/type").and_then(|v| v.as_str()).unwrap_or("");
     match response_type {
         "SUCCESSFUL" => match body.get("serviceTicketId").and_then(|v| v.as_str()) {
-            Some(ticket) => Ok(LoginOutcome::Success {
-                service_ticket: ticket.to_string(),
-            }),
+            Some(ticket) => Ok(LoginOutcome::Success { service_ticket: ticket.to_string() }),
             None => Err(AppError::new(
                 crate::EXIT_AUTH,
                 "Garmin login succeeded but returned no serviceTicketId",
@@ -361,9 +348,7 @@ pub fn login(
                 .and_then(|v| v.as_str())
                 .filter(|m| *m == "email" || *m == "totp")
                 .unwrap_or("email");
-            Ok(LoginOutcome::MfaRequired {
-                method: method.to_string(),
-            })
+            Ok(LoginOutcome::MfaRequired { method: method.to_string() })
         }
         "INVALID_USERNAME_PASSWORD" => Err(AppError::new(
             crate::EXIT_AUTH,
@@ -389,10 +374,7 @@ pub fn verify_mfa(client: &HttpClient, method: &str, code: &str) -> Result<MfaOu
     })?;
     let body = sso_json(status, &body, "MFA verification")?;
 
-    let response_type = body
-        .pointer("/responseStatus/type")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
+    let response_type = body.pointer("/responseStatus/type").and_then(|v| v.as_str()).unwrap_or("");
     match response_type {
         "SUCCESSFUL" => match body.get("serviceTicketId").and_then(|v| v.as_str()) {
             Some(ticket) => Ok(MfaOutcome::Ticket(ticket.to_string())),
@@ -480,16 +462,15 @@ fn parse_di_response(status: u16, body: &str, client_id: &str) -> Result<DiToken
         &format!("DI token endpoint returned HTTP {status} for {client_id}"),
         "DI token endpoint returned invalid JSON",
     )?;
-    let access_token = json
-        .get("access_token")
-        .and_then(|v| v.as_str())
-        .filter(|v| !v.is_empty())
-        .ok_or_else(|| {
-            AppError::new(
-                crate::EXIT_AUTH,
-                format!("DI token response had no access_token for {client_id}"),
-            )
-        })?;
+    let access_token =
+        json.get("access_token").and_then(|v| v.as_str()).filter(|v| !v.is_empty()).ok_or_else(
+            || {
+                AppError::new(
+                    crate::EXIT_AUTH,
+                    format!("DI token response had no access_token for {client_id}"),
+                )
+            },
+        )?;
     Ok(DiTokens {
         access_token: access_token.to_string(),
         refresh_token: json
@@ -585,10 +566,7 @@ mod tests {
                 ("client_id".into(), "CID".into()),
                 ("service_ticket".into(), "ST-1".into()),
                 ("grant_type".into(), DI_GRANT_TYPE.into()),
-                (
-                    "service_url".into(),
-                    "https://mobile.integration.garmin.com/gcm/android".into()
-                ),
+                ("service_url".into(), "https://mobile.integration.garmin.com/gcm/android".into()),
             ]
         );
     }
@@ -646,11 +624,7 @@ mod tests {
     fn parse_di_response_rejects_missing_access_token() {
         let error = parse_di_response(200, r#"{"error":"invalid_client"}"#, "CID").unwrap_err();
         assert_eq!(error.code, crate::EXIT_AUTH);
-        assert!(
-            error.message.contains("no access_token"),
-            "{}",
-            error.message
-        );
+        assert!(error.message.contains("no access_token"), "{}", error.message);
     }
 
     #[test]

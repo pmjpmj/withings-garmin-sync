@@ -4,7 +4,7 @@
 
 mod common;
 
-use common::{run_bin, run_bin_stdin, write_file, FakeResponse, FakeServer, Route, TempDir};
+use common::{FakeResponse, FakeServer, Route, TempDir, run_bin, run_bin_stdin, write_file};
 
 const CONFIG: &str =
     "[withings]\nclient_id = \"test-client-id\"\nclient_secret = \"test-client-secret\"\n";
@@ -30,9 +30,7 @@ fn withings_token_server() -> FakeServer {
 /// Minimal always-succeeding Garmin SSO + diauth pair.
 fn garmin_servers() -> (FakeServer, FakeServer) {
     let sso = FakeServer::start(vec![
-        Route::get("/mobile/sso/en_US/sign-in", |_req, _i| {
-            FakeResponse::new(200, "ok")
-        }),
+        Route::get("/mobile/sso/en_US/sign-in", |_req, _i| FakeResponse::new(200, "ok")),
         Route::post("/mobile/api/login", |_req, _i| {
             FakeResponse::json(
                 200,
@@ -40,15 +38,10 @@ fn garmin_servers() -> (FakeServer, FakeServer) {
             )
         }),
     ]);
-    let diauth = FakeServer::start(vec![Route::post(
-        "/di-oauth2-service/oauth/token",
-        |_req, _i| {
-            FakeResponse::json(
-                200,
-                r#"{"access_token": "new-ga", "refresh_token": "new-gr"}"#,
-            )
-        },
-    )]);
+    let diauth =
+        FakeServer::start(vec![Route::post("/di-oauth2-service/oauth/token", |_req, _i| {
+            FakeResponse::json(200, r#"{"access_token": "new-ga", "refresh_token": "new-gr"}"#)
+        })]);
     (sso, diauth)
 }
 
@@ -117,11 +110,7 @@ fn auth_flags_conflict_with_service_subcommands() {
     // before the subcommand is rejected loudly rather than silently ignored.
     let run = run_bin(&["auth", "--config-dir", "/tmp/x", "withings"], &[]);
     assert_eq!(run.code, 2);
-    assert!(
-        run.stderr.contains("cannot be used with"),
-        "stderr: {}",
-        run.stderr
-    );
+    assert!(run.stderr.contains("cannot be used with"), "stderr: {}", run.stderr);
 }
 
 // ---------------------------------------------------------------------------
@@ -146,25 +135,14 @@ fn bare_auth_runs_both_services_and_persists_both_sections() {
     );
 
     assert_eq!(run.code, 0, "stderr: {}", run.stderr);
-    assert!(
-        run.stdout.contains("auth: Withings connected"),
-        "stdout: {}",
-        run.stdout
-    );
-    assert!(
-        run.stdout.contains("auth: Garmin connected"),
-        "stdout: {}",
-        run.stdout
-    );
+    assert!(run.stdout.contains("auth: Withings connected"), "stdout: {}", run.stdout);
+    assert!(run.stdout.contains("auth: Garmin connected"), "stdout: {}", run.stdout);
     let tokens = read_tokens(&dir);
     assert_eq!(tokens["withings"]["access_token"], "new-wa");
     assert_eq!(tokens["withings"]["refresh_token"], "new-wr");
     assert_eq!(tokens["garmin"]["access_token"], "new-ga");
     assert_eq!(tokens["garmin"]["refresh_token"], "new-gr");
-    assert_eq!(
-        tokens["garmin"]["client_id"],
-        "GARMIN_CONNECT_MOBILE_ANDROID_DI_2025Q2"
-    );
+    assert_eq!(tokens["garmin"]["client_id"], "GARMIN_CONNECT_MOBILE_ANDROID_DI_2025Q2");
 }
 
 #[test]
@@ -178,9 +156,7 @@ fn verbose_auth_redacts_credentials_tokens_and_ticket() {
         )
     })]);
     let sso = FakeServer::start(vec![
-        Route::get("/mobile/sso/en_US/sign-in", |_req, _i| {
-            FakeResponse::new(200, "ok")
-        }),
+        Route::get("/mobile/sso/en_US/sign-in", |_req, _i| FakeResponse::new(200, "ok")),
         Route::post("/mobile/api/login", |_req, _i| {
             FakeResponse::json(
                 200,
@@ -199,12 +175,7 @@ fn verbose_auth_redacts_credentials_tokens_and_ticket() {
     )]);
 
     let run = run_bin_stdin(
-        &[
-            "auth",
-            "--verbose",
-            "--config-dir",
-            dir.path().to_str().unwrap(),
-        ],
+        &["auth", "--verbose", "--config-dir", dir.path().to_str().unwrap()],
         &[
             ("WGS_WITHINGS_API_BASE", withings.base_url.as_str()),
             ("WGS_GARMIN_SSO_BASE", sso.base_url.as_str()),
@@ -224,18 +195,10 @@ fn verbose_auth_redacts_credentials_tokens_and_ticket() {
         "garmin-access-secret",
         "garmin-refresh-secret",
     ] {
-        assert!(
-            !run.stderr.contains(secret),
-            "leaked {secret}: {}",
-            run.stderr
-        );
+        assert!(!run.stderr.contains(secret), "leaked {secret}: {}", run.stderr);
     }
     for field in ["code", "password", "client_secret", "service_ticket"] {
-        assert!(
-            run.stderr.contains(field),
-            "missing {field}: {}",
-            run.stderr
-        );
+        assert!(run.stderr.contains(field), "missing {field}: {}", run.stderr);
     }
 }
 
@@ -255,27 +218,14 @@ fn auth_withings_replaces_only_the_withings_section() {
     let mut env = unreachable_other_service();
     env.push(("WGS_WITHINGS_API_BASE", withings.base_url.as_str()));
     let run = run_bin_stdin(
-        &[
-            "auth",
-            "withings",
-            "--config-dir",
-            dir.path().to_str().unwrap(),
-        ],
+        &["auth", "withings", "--config-dir", dir.path().to_str().unwrap()],
         &env,
         Some("http://localhost:8765/?code=abc123\n"),
     );
 
     assert_eq!(run.code, 0, "stderr: {}", run.stderr);
-    assert!(
-        run.stdout.contains("auth: Withings connected"),
-        "stdout: {}",
-        run.stdout
-    );
-    assert!(
-        !run.stdout.contains("auth: Garmin connected"),
-        "stdout: {}",
-        run.stdout
-    );
+    assert!(run.stdout.contains("auth: Withings connected"), "stdout: {}", run.stdout);
+    assert!(!run.stdout.contains("auth: Garmin connected"), "stdout: {}", run.stdout);
 
     let tokens = read_tokens(&dir);
     assert_eq!(tokens["withings"]["access_token"], "new-wa");
@@ -283,10 +233,7 @@ fn auth_withings_replaces_only_the_withings_section() {
     // The garmin section is untouched.
     assert_eq!(tokens["garmin"]["access_token"], "old-ga");
     assert_eq!(tokens["garmin"]["refresh_token"], "old-gr");
-    assert_eq!(
-        tokens["garmin"]["client_id"],
-        "GARMIN_CONNECT_MOBILE_ANDROID_DI_2025Q2"
-    );
+    assert_eq!(tokens["garmin"]["client_id"], "GARMIN_CONNECT_MOBILE_ANDROID_DI_2025Q2");
 }
 
 #[test]
@@ -299,12 +246,7 @@ fn auth_garmin_needs_no_config_and_replaces_only_the_garmin_section() {
     // The Withings base URL points at a dead port: a garmin-only run must
     // never touch the Withings flow.
     let run = run_bin_stdin(
-        &[
-            "auth",
-            "garmin",
-            "--config-dir",
-            dir.path().to_str().unwrap(),
-        ],
+        &["auth", "garmin", "--config-dir", dir.path().to_str().unwrap()],
         &[
             ("WGS_WITHINGS_API_BASE", "http://127.0.0.1:1"),
             ("WGS_GARMIN_SSO_BASE", sso.base_url.as_str()),
@@ -314,16 +256,8 @@ fn auth_garmin_needs_no_config_and_replaces_only_the_garmin_section() {
     );
 
     assert_eq!(run.code, 0, "stderr: {}", run.stderr);
-    assert!(
-        run.stdout.contains("auth: Garmin connected"),
-        "stdout: {}",
-        run.stdout
-    );
-    assert!(
-        !run.stdout.contains("auth: Withings connected"),
-        "stdout: {}",
-        run.stdout
-    );
+    assert!(run.stdout.contains("auth: Garmin connected"), "stdout: {}", run.stdout);
+    assert!(!run.stdout.contains("auth: Withings connected"), "stdout: {}", run.stdout);
 
     let tokens = read_tokens(&dir);
     assert_eq!(tokens["garmin"]["access_token"], "new-ga");
@@ -356,12 +290,7 @@ fn failed_auth_withings_leaves_tokens_file_byte_identical() {
     let mut env = unreachable_other_service();
     env.push(("WGS_WITHINGS_API_BASE", withings.base_url.as_str()));
     let run = run_bin_stdin(
-        &[
-            "auth",
-            "withings",
-            "--config-dir",
-            dir.path().to_str().unwrap(),
-        ],
+        &["auth", "withings", "--config-dir", dir.path().to_str().unwrap()],
         &env,
         Some("http://localhost:8765/?code=bad-code\n"),
     );
@@ -373,10 +302,7 @@ fn failed_auth_withings_leaves_tokens_file_byte_identical() {
         run.stderr
     );
     let after = std::fs::read(dir.path().join("tokens.json")).unwrap();
-    assert_eq!(
-        before, after,
-        "a failed auth withings must leave tokens.json byte-identical"
-    );
+    assert_eq!(before, after, "a failed auth withings must leave tokens.json byte-identical");
 }
 
 #[test]
@@ -386,25 +312,15 @@ fn failed_auth_garmin_leaves_tokens_file_byte_identical() {
     let before = std::fs::read(dir.path().join("tokens.json")).unwrap();
 
     let sso = FakeServer::start(vec![
-        Route::get("/mobile/sso/en_US/sign-in", |_req, _i| {
-            FakeResponse::new(200, "ok")
-        }),
+        Route::get("/mobile/sso/en_US/sign-in", |_req, _i| FakeResponse::new(200, "ok")),
         Route::post("/mobile/api/login", |_req, _i| {
-            FakeResponse::json(
-                200,
-                r#"{"responseStatus": {"type": "INVALID_USERNAME_PASSWORD"}}"#,
-            )
+            FakeResponse::json(200, r#"{"responseStatus": {"type": "INVALID_USERNAME_PASSWORD"}}"#)
         }),
     ]);
     let diauth = FakeServer::start(vec![]);
 
     let run = run_bin_stdin(
-        &[
-            "auth",
-            "garmin",
-            "--config-dir",
-            dir.path().to_str().unwrap(),
-        ],
+        &["auth", "garmin", "--config-dir", dir.path().to_str().unwrap()],
         &[
             ("WGS_WITHINGS_API_BASE", "http://127.0.0.1:1"),
             ("WGS_GARMIN_SSO_BASE", sso.base_url.as_str()),
@@ -415,15 +331,10 @@ fn failed_auth_garmin_leaves_tokens_file_byte_identical() {
 
     assert_eq!(run.code, 4, "stdout: {}", run.stdout);
     assert!(
-        run.stderr
-            .to_lowercase()
-            .contains("invalid username or password"),
+        run.stderr.to_lowercase().contains("invalid username or password"),
         "stderr: {}",
         run.stderr
     );
     let after = std::fs::read(dir.path().join("tokens.json")).unwrap();
-    assert_eq!(
-        before, after,
-        "a failed auth garmin must leave tokens.json byte-identical"
-    );
+    assert_eq!(before, after, "a failed auth garmin must leave tokens.json byte-identical");
 }
