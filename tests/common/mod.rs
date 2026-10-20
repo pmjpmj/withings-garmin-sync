@@ -86,12 +86,7 @@ pub fn run_bin_stdin(args: &[&str], envs: &[(&str, &str)], stdin: Option<&str>) 
                 .stderr(Stdio::piped())
                 .spawn()
                 .expect("spawn binary");
-            child
-                .stdin
-                .take()
-                .expect("stdin")
-                .write_all(input.as_bytes())
-                .expect("write stdin");
+            child.stdin.take().expect("stdin").write_all(input.as_bytes()).expect("write stdin");
             let output = child.wait_with_output().expect("wait for binary");
             Run::from(output)
         }
@@ -198,10 +193,7 @@ pub struct RecordedRequest {
 
 impl RecordedRequest {
     pub fn header(&self, name: &str) -> Option<&str> {
-        self.headers
-            .iter()
-            .find(|(k, _)| k.eq_ignore_ascii_case(name))
-            .map(|(_, v)| v.as_str())
+        self.headers.iter().find(|(k, _)| k.eq_ignore_ascii_case(name)).map(|(_, v)| v.as_str())
     }
 }
 
@@ -215,11 +207,7 @@ pub struct FakeResponse {
 
 impl FakeResponse {
     pub fn new(status: u16, body: impl Into<Vec<u8>>) -> Self {
-        FakeResponse {
-            status,
-            headers: Vec::new(),
-            body: body.into(),
-        }
+        FakeResponse { status, headers: Vec::new(), body: body.into() }
     }
 
     pub fn json(status: u16, body: &str) -> Self {
@@ -251,12 +239,7 @@ impl Route {
         path: &'static str,
         handler: impl Fn(&RecordedRequest, usize) -> FakeResponse + Send + Sync + 'static,
     ) -> Self {
-        Route {
-            method,
-            path,
-            prefix: false,
-            handler: Box::new(handler),
-        }
+        Route { method, path, prefix: false, handler: Box::new(handler) }
     }
 
     pub fn post(
@@ -279,12 +262,7 @@ impl Route {
         prefix: &'static str,
         handler: impl Fn(&RecordedRequest, usize) -> FakeResponse + Send + Sync + 'static,
     ) -> Self {
-        Route {
-            method: "GET",
-            path: prefix,
-            prefix: true,
-            handler: Box::new(handler),
-        }
+        Route { method: "GET", path: prefix, prefix: true, handler: Box::new(handler) }
     }
 }
 
@@ -330,12 +308,7 @@ impl FakeServer {
             }
         });
 
-        FakeServer {
-            base_url,
-            requests,
-            stop,
-            handle: Some(handle),
-        }
+        FakeServer { base_url, requests, stop, handle: Some(handle) }
     }
 
     /// All requests received so far, in arrival order.
@@ -345,10 +318,7 @@ impl FakeServer {
 
     /// Requests matching `method` and `path`, in arrival order.
     pub fn requests_for(&self, method: &str, path: &str) -> Vec<RecordedRequest> {
-        self.requests()
-            .into_iter()
-            .filter(|r| r.method == method && r.path == path)
-            .collect()
+        self.requests().into_iter().filter(|r| r.method == method && r.path == path).collect()
     }
 }
 
@@ -464,9 +434,7 @@ fn read_request(stream: &mut TcpStream) -> std::io::Result<RecordedRequest> {
 }
 
 fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
-    haystack
-        .windows(needle.len())
-        .position(|window| window == needle)
+    haystack.windows(needle.len()).position(|window| window == needle)
 }
 
 fn write_response(stream: &mut TcpStream, response: &FakeResponse) -> std::io::Result<()> {

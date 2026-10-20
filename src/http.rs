@@ -49,11 +49,7 @@ impl HttpClient {
             .timeout(std::time::Duration::from_secs(30))
             .build()
             .expect("build HTTP client");
-        Self {
-            base,
-            inner,
-            verbose: false,
-        }
+        Self { base, inner, verbose: false }
     }
 
     pub fn with_verbose(mut self, verbose: bool) -> Self {
@@ -105,11 +101,8 @@ impl HttpClient {
         headers: &[(&str, &str)],
         basic_auth: Option<(&str, &str)>,
     ) -> Result<(u16, String), HttpError> {
-        let body: String = fields
-            .iter()
-            .map(|(k, v)| format!("{k}={v}"))
-            .collect::<Vec<_>>()
-            .join("&");
+        let body: String =
+            fields.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join("&");
         self.log_request("POST", url, headers, &body);
         let mut request = self.inner.post(url).form(fields);
         for (name, value) in headers {
@@ -152,9 +145,8 @@ impl HttpClient {
         request: reqwest::blocking::RequestBuilder,
         url: &str,
     ) -> Result<(u16, String), HttpError> {
-        let response = request
-            .send()
-            .map_err(|error| HttpError::Transport(format!("{url}: {error}")))?;
+        let response =
+            request.send().map_err(|error| HttpError::Transport(format!("{url}: {error}")))?;
         let status = response.status().as_u16();
         let version = response.version();
         let response_headers: Vec<String> = response
@@ -164,9 +156,8 @@ impl HttpClient {
                 redact_header(name.as_str(), value.to_str().unwrap_or("<non-utf8 value>"))
             })
             .collect();
-        let body = response
-            .text()
-            .map_err(|error| HttpError::Transport(format!("{url}: {error}")))?;
+        let body =
+            response.text().map_err(|error| HttpError::Transport(format!("{url}: {error}")))?;
         if self.verbose {
             let preview: String = redact_body(&body).chars().take(300).collect();
             eprintln!("[verbose] <- HTTP {status} ({version:?}) {url}");
@@ -220,14 +211,8 @@ impl std::fmt::Display for HttpError {
     }
 }
 
-const SECRET_FIELDS: &[&str] = &[
-    "password",
-    "client_secret",
-    "access_token",
-    "refresh_token",
-    "service_ticket",
-    "code",
-];
+const SECRET_FIELDS: &[&str] =
+    &["password", "client_secret", "access_token", "refresh_token", "service_ticket", "code"];
 
 fn redact_header(name: &str, value: &str) -> String {
     if name.eq_ignore_ascii_case("authorization") || name.eq_ignore_ascii_case("set-cookie") {
@@ -326,53 +311,6 @@ fn hex(byte: u8) -> Option<u8> {
     }
 }
 
-#[cfg(test)]
-mod redaction_tests {
-    use super::{redact_body, redact_header, HttpError};
-
-    #[test]
-    fn redacts_form_fields_and_preserves_safe_fields() {
-        assert_eq!(
-            redact_body("client_id=abc&client_secret=shh&code=one"),
-            "client_id=abc&client_secret=[REDACTED]&code=[REDACTED]"
-        );
-    }
-
-    #[test]
-    fn redacts_nested_json_secrets() {
-        assert_eq!(
-            redact_body(r#"{"access_token":"a","nested":[{"refresh_token":"r"}],"state":"ok"}"#),
-            r#"{"access_token":"[REDACTED]","nested":[{"refresh_token":"[REDACTED]"}],"state":"ok"}"#
-        );
-    }
-
-    #[test]
-    fn leaves_non_json_non_form_text_alone() {
-        assert_eq!(redact_body("service_ticket blah"), "service_ticket blah");
-    }
-
-    #[test]
-    fn redacts_sensitive_headers_case_insensitively() {
-        assert_eq!(
-            redact_header("authorization", "Bearer secret"),
-            "authorization: [REDACTED]"
-        );
-        assert_eq!(
-            redact_header("SET-cookie", "sid=secret"),
-            "SET-cookie: [REDACTED]"
-        );
-        assert_eq!(redact_header("x-safe", "value"), "x-safe: value");
-    }
-
-    #[test]
-    fn status_error_display_redacts_json_body() {
-        assert_eq!(
-            HttpError::Status(401, r#"{"access_token":"secret"}"#.into()).to_string(),
-            "HTTP 401: {\"access_token\":\"[REDACTED]\"}"
-        );
-    }
-}
-
 impl std::error::Error for HttpError {}
 
 /// Exponential backoff sleep: 200ms * 2^attempt. Kept small so tests stay
@@ -418,9 +356,46 @@ pub fn query_encode(value: &str) -> String {
 }
 
 fn join(base: &str, path: &str) -> String {
-    format!(
-        "{}/{}",
-        base.trim_end_matches('/'),
-        path.trim_start_matches('/')
-    )
+    format!("{}/{}", base.trim_end_matches('/'), path.trim_start_matches('/'))
+}
+
+#[cfg(test)]
+mod redaction_tests {
+    use super::{HttpError, redact_body, redact_header};
+
+    #[test]
+    fn redacts_form_fields_and_preserves_safe_fields() {
+        assert_eq!(
+            redact_body("client_id=abc&client_secret=shh&code=one"),
+            "client_id=abc&client_secret=[REDACTED]&code=[REDACTED]"
+        );
+    }
+
+    #[test]
+    fn redacts_nested_json_secrets() {
+        assert_eq!(
+            redact_body(r#"{"access_token":"a","nested":[{"refresh_token":"r"}],"state":"ok"}"#),
+            r#"{"access_token":"[REDACTED]","nested":[{"refresh_token":"[REDACTED]"}],"state":"ok"}"#
+        );
+    }
+
+    #[test]
+    fn leaves_non_json_non_form_text_alone() {
+        assert_eq!(redact_body("service_ticket blah"), "service_ticket blah");
+    }
+
+    #[test]
+    fn redacts_sensitive_headers_case_insensitively() {
+        assert_eq!(redact_header("authorization", "Bearer secret"), "authorization: [REDACTED]");
+        assert_eq!(redact_header("SET-cookie", "sid=secret"), "SET-cookie: [REDACTED]");
+        assert_eq!(redact_header("x-safe", "value"), "x-safe: value");
+    }
+
+    #[test]
+    fn status_error_display_redacts_json_body() {
+        assert_eq!(
+            HttpError::Status(401, r#"{"access_token":"secret"}"#.into()).to_string(),
+            "HTTP 401: {\"access_token\":\"[REDACTED]\"}"
+        );
+    }
 }

@@ -5,7 +5,7 @@
 mod common;
 
 use common::{
-    form_value, parse_form, run_bin_stdin, write_file, FakeResponse, FakeServer, Route, TempDir,
+    FakeResponse, FakeServer, Route, TempDir, form_value, parse_form, run_bin_stdin, write_file,
 };
 use serde_json::json;
 
@@ -132,10 +132,7 @@ fn auth_completes_mobile_sso_sequence_and_persists_di_tokens() {
     assert_eq!(sso_requests[1].path, "/mobile/api/login");
     assert_eq!(sso_requests[1].query, LOGIN_QUERY);
     assert!(
-        sso_requests[1]
-            .header("cookie")
-            .unwrap_or("")
-            .contains("SESSIONID=abc123"),
+        sso_requests[1].header("cookie").unwrap_or("").contains("SESSIONID=abc123"),
         "login cookies: {:?}",
         sso_requests[1]
     );
@@ -155,10 +152,7 @@ fn auth_completes_mobile_sso_sequence_and_persists_di_tokens() {
         format!("Basic {}", b64("GARMIN_CONNECT_MOBILE_ANDROID_DI_2025Q2:"))
     );
     let fields = parse_form(&first.body);
-    assert_eq!(
-        form_value(&fields, "client_id"),
-        "GARMIN_CONNECT_MOBILE_ANDROID_DI_2025Q2"
-    );
+    assert_eq!(form_value(&fields, "client_id"), "GARMIN_CONNECT_MOBILE_ANDROID_DI_2025Q2");
     assert_eq!(form_value(&fields, "service_ticket"), "ST-12345");
     assert_eq!(
         form_value(&fields, "grant_type"),
@@ -174,10 +168,7 @@ fn auth_completes_mobile_sso_sequence_and_persists_di_tokens() {
         first.header("x-garmin-user-agent").unwrap(),
         "com.garmin.android.apps.connectmobile/5.23; ; Google/sdk_gphone64_arm64/google; Android/33; Dalvik/2.1.0"
     );
-    assert_eq!(
-        first.header("x-garmin-paired-app-version").unwrap(),
-        "10861"
-    );
+    assert_eq!(first.header("x-garmin-paired-app-version").unwrap(), "10861");
     assert_eq!(first.header("x-garmin-client-platform").unwrap(), "Android");
     assert_eq!(first.header("x-app-ver").unwrap(), "10861");
     assert_eq!(first.header("x-lang").unwrap(), "en");
@@ -185,27 +176,18 @@ fn auth_completes_mobile_sso_sequence_and_persists_di_tokens() {
     assert_eq!(first.header("accept").unwrap(), "application/json");
 
     // Tokens (including the winning client id) are persisted.
-    assert!(
-        run.stdout.contains("auth: Garmin connected"),
-        "stdout: {}",
-        run.stdout
-    );
+    assert!(run.stdout.contains("auth: Garmin connected"), "stdout: {}", run.stdout);
     let tokens = read_tokens_json(&dir);
     assert_eq!(tokens["garmin"]["access_token"], "di-access");
     assert_eq!(tokens["garmin"]["refresh_token"], "di-refresh");
-    assert_eq!(
-        tokens["garmin"]["client_id"],
-        "GARMIN_CONNECT_MOBILE_ANDROID_DI_2025Q2"
-    );
+    assert_eq!(tokens["garmin"]["client_id"], "GARMIN_CONNECT_MOBILE_ANDROID_DI_2025Q2");
 }
 
 #[test]
 fn auth_persists_garmin_tokens_and_winning_client_id() {
     let (_run, dir, _sso, _diauth) = run_garmin_auth_ok(
         vec![
-            Route::get("/mobile/sso/en_US/sign-in", |_req, _i| {
-                FakeResponse::new(200, "ok")
-            }),
+            Route::get("/mobile/sso/en_US/sign-in", |_req, _i| FakeResponse::new(200, "ok")),
             login_success("ST-999"),
         ],
         vec![Route::post("/di-oauth2-service/oauth/token", |_req, _i| {
@@ -216,10 +198,7 @@ fn auth_persists_garmin_tokens_and_winning_client_id() {
     let tokens = read_tokens_json(&dir);
     assert_eq!(tokens["garmin"]["access_token"], "di-access-2");
     assert_eq!(tokens["garmin"]["refresh_token"], "di-refresh-2");
-    assert_eq!(
-        tokens["garmin"]["client_id"],
-        "GARMIN_CONNECT_MOBILE_ANDROID_DI_2025Q2"
-    );
+    assert_eq!(tokens["garmin"]["client_id"], "GARMIN_CONNECT_MOBILE_ANDROID_DI_2025Q2");
     // The Withings tokens from the first half of `auth` sit alongside.
     assert_eq!(tokens["withings"]["access_token"], "wa-access");
 }
@@ -228,9 +207,7 @@ fn auth_persists_garmin_tokens_and_winning_client_id() {
 fn auth_mfa_branch_prompts_for_code_and_verifies() {
     let (run, _dir, sso, diauth) = run_garmin_auth_ok(
         vec![
-            Route::get("/mobile/sso/en_US/sign-in", |_req, _i| {
-                FakeResponse::new(200, "ok")
-            }),
+            Route::get("/mobile/sso/en_US/sign-in", |_req, _i| FakeResponse::new(200, "ok")),
             Route::post("/mobile/api/login", move |_req, _i| {
                 FakeResponse::json(
                     200,
@@ -271,24 +248,15 @@ fn auth_mfa_branch_prompts_for_code_and_verifies() {
     );
 
     let token_calls = diauth.requests_for("POST", "/di-oauth2-service/oauth/token");
-    assert_eq!(
-        form_value(&parse_form(&token_calls[0].body), "service_ticket"),
-        "ST-MFA"
-    );
-    assert!(
-        run.stdout.contains("auth: Garmin connected"),
-        "stdout: {}",
-        run.stdout
-    );
+    assert_eq!(form_value(&parse_form(&token_calls[0].body), "service_ticket"), "ST-MFA");
+    assert!(run.stdout.contains("auth: Garmin connected"), "stdout: {}", run.stdout);
 }
 
 #[test]
 fn auth_mfa_invalid_code_loops_until_valid() {
     let (_run, _dir, sso, diauth) = run_garmin_auth_ok(
         vec![
-            Route::get("/mobile/sso/en_US/sign-in", |_req, _i| {
-                FakeResponse::new(200, "ok")
-            }),
+            Route::get("/mobile/sso/en_US/sign-in", |_req, _i| FakeResponse::new(200, "ok")),
             Route::post("/mobile/api/login", move |_req, _i| {
                 FakeResponse::json(
                     200,
@@ -326,31 +294,23 @@ fn auth_mfa_invalid_code_loops_until_valid() {
     assert_eq!(second["mfaVerificationCode"], "goodcode");
 
     let token_calls = diauth.requests_for("POST", "/di-oauth2-service/oauth/token");
-    assert_eq!(
-        form_value(&parse_form(&token_calls[0].body), "service_ticket"),
-        "ST-OK"
-    );
+    assert_eq!(form_value(&parse_form(&token_calls[0].body), "service_ticket"), "ST-OK");
 }
 
 #[test]
 fn auth_retries_di_client_ids_in_order() {
     let (_run, dir, _sso, diauth) = run_garmin_auth_ok(
         vec![
-            Route::get("/mobile/sso/en_US/sign-in", |_req, _i| {
-                FakeResponse::new(200, "ok")
-            }),
+            Route::get("/mobile/sso/en_US/sign-in", |_req, _i| FakeResponse::new(200, "ok")),
             login_success("ST-777"),
         ],
-        vec![Route::post(
-            "/di-oauth2-service/oauth/token",
-            |_req, call| {
-                if call == 0 {
-                    FakeResponse::new(401, r#"{"error": "invalid_client"}"#)
-                } else {
-                    FakeResponse::json(200, &di_tokens("di-access", "di-refresh"))
-                }
-            },
-        )],
+        vec![Route::post("/di-oauth2-service/oauth/token", |_req, call| {
+            if call == 0 {
+                FakeResponse::new(401, r#"{"error": "invalid_client"}"#)
+            } else {
+                FakeResponse::json(200, &di_tokens("di-access", "di-refresh"))
+            }
+        })],
         "http://localhost:8765/?code=abc123\nuser@example.com\nsecret\n",
     );
 
@@ -380,14 +340,9 @@ fn auth_invalid_username_password_exits_4_without_garmin_tokens() {
     write_config(&dir);
     let withings = withings_server();
     let sso = FakeServer::start(vec![
-        Route::get("/mobile/sso/en_US/sign-in", |_req, _i| {
-            FakeResponse::new(200, "ok")
-        }),
+        Route::get("/mobile/sso/en_US/sign-in", |_req, _i| FakeResponse::new(200, "ok")),
         Route::post("/mobile/api/login", |_req, _i| {
-            FakeResponse::json(
-                200,
-                r#"{"responseStatus": {"type": "INVALID_USERNAME_PASSWORD"}}"#,
-            )
+            FakeResponse::json(200, r#"{"responseStatus": {"type": "INVALID_USERNAME_PASSWORD"}}"#)
         }),
     ]);
     let diauth = FakeServer::start(vec![]);
@@ -404,9 +359,7 @@ fn auth_invalid_username_password_exits_4_without_garmin_tokens() {
 
     assert_eq!(run.code, 4, "stdout: {}", run.stdout);
     assert!(
-        run.stderr
-            .to_lowercase()
-            .contains("invalid username or password"),
+        run.stderr.to_lowercase().contains("invalid username or password"),
         "stderr: {}",
         run.stderr
     );
@@ -429,15 +382,13 @@ fn auth_di_exchange_total_failure_exits_4() {
     write_config(&dir);
     let withings = withings_server();
     let sso = FakeServer::start(vec![
-        Route::get("/mobile/sso/en_US/sign-in", |_req, _i| {
-            FakeResponse::new(200, "ok")
-        }),
+        Route::get("/mobile/sso/en_US/sign-in", |_req, _i| FakeResponse::new(200, "ok")),
         login_success("ST-888"),
     ]);
-    let diauth = FakeServer::start(vec![Route::post(
-        "/di-oauth2-service/oauth/token",
-        |_req, _i| FakeResponse::new(401, "nope"),
-    )]);
+    let diauth =
+        FakeServer::start(vec![Route::post("/di-oauth2-service/oauth/token", |_req, _i| {
+            FakeResponse::new(401, "nope")
+        })]);
 
     let run = run_bin_stdin(
         &["auth", "--config-dir", dir.path().to_str().unwrap()],
@@ -451,12 +402,7 @@ fn auth_di_exchange_total_failure_exits_4() {
 
     assert_eq!(run.code, 4, "stdout: {}", run.stdout);
     // All three candidates were tried.
-    assert_eq!(
-        diauth
-            .requests_for("POST", "/di-oauth2-service/oauth/token")
-            .len(),
-        3
-    );
+    assert_eq!(diauth.requests_for("POST", "/di-oauth2-service/oauth/token").len(), 3);
     // The failed exchange persists no garmin tokens (ADR-0006: each half of
     // `auth` replaces only its own section).
     let tokens_path = dir.path().join("tokens.json");
@@ -476,12 +422,8 @@ fn auth_garmin_429_exits_4_with_rate_limit_message() {
     write_config(&dir);
     let withings = withings_server();
     let sso = FakeServer::start(vec![
-        Route::get("/mobile/sso/en_US/sign-in", |_req, _i| {
-            FakeResponse::new(200, "ok")
-        }),
-        Route::post("/mobile/api/login", |_req, _i| {
-            FakeResponse::new(429, "slow down")
-        }),
+        Route::get("/mobile/sso/en_US/sign-in", |_req, _i| FakeResponse::new(200, "ok")),
+        Route::post("/mobile/api/login", |_req, _i| FakeResponse::new(429, "slow down")),
     ]);
     let diauth = FakeServer::start(vec![]);
 
@@ -509,9 +451,7 @@ fn auth_uses_encoded_service_in_login_query() {
     // test pins the exact query strings so a drift in encoding is caught.
     let (_run, _dir, sso, _diauth) = run_garmin_auth_ok(
         vec![
-            Route::get("/mobile/sso/en_US/sign-in", |_req, _i| {
-                FakeResponse::new(200, "ok")
-            }),
+            Route::get("/mobile/sso/en_US/sign-in", |_req, _i| FakeResponse::new(200, "ok")),
             login_success("ST-Q"),
         ],
         vec![Route::post("/di-oauth2-service/oauth/token", |_req, _i| {

@@ -6,8 +6,8 @@
 mod common;
 
 use common::{
-    form_value, parse_form, run_bin, write_valid_config_and_tokens, FakeResponse, FakeServer,
-    Route, TempDir,
+    FakeResponse, FakeServer, Route, TempDir, form_value, parse_form, run_bin,
+    write_valid_config_and_tokens,
 };
 use serde_json::json;
 
@@ -19,10 +19,7 @@ const JAN1: i64 = 1767225600;
 const FEB1: i64 = 1769904000;
 
 fn now() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs() as i64
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64
 }
 
 /// A Withings `getmeas` response page.
@@ -74,9 +71,7 @@ fn single_page_withings(groups: Vec<serde_json::Value>) -> FakeServer {
 /// missing writes.
 fn ok_garmin() -> FakeServer {
     FakeServer::start(vec![
-        Route::post("/weight-service/user-weight", |_req, _i| {
-            FakeResponse::new(204, "")
-        }),
+        Route::post("/weight-service/user-weight", |_req, _i| FakeResponse::new(204, "")),
         Route::post("/bloodpressure-service/bloodpressure", |_req, _i| {
             FakeResponse::json(200, "{}")
         }),
@@ -140,10 +135,7 @@ fn dry_run_reads_window_and_reports_would_writes_without_writing() {
     let start: i64 = form_value(&fields, "startdate").parse().unwrap();
     let end: i64 = form_value(&fields, "enddate").parse().unwrap();
     let n = now();
-    assert!(
-        (n - 86400 - start).abs() < 120,
-        "startdate {start} not ~1d ago"
-    );
+    assert!((n - 86400 - start).abs() < 120, "startdate {start} not ~1d ago");
     assert!((n - end).abs() < 120, "enddate {end} not ~now");
     assert_eq!(
         reads[0].header("authorization").unwrap(),
@@ -155,20 +147,17 @@ fn dry_run_reads_window_and_reports_would_writes_without_writing() {
     // The would-write report: metric, value, timestamp; decoded via 10^unit.
     assert!(run.stdout.contains("dry-run"), "stdout: {}", run.stdout);
     assert!(
-        run.stdout
-            .contains("would write 1 weight and 1 blood-pressure measurements"),
+        run.stdout.contains("would write 1 weight and 1 blood-pressure measurements"),
         "stdout: {}",
         run.stdout
     );
     assert!(
-        run.stdout
-            .contains("weight: 82.4 kg at 2026-01-02T08:30:00.000"),
+        run.stdout.contains("weight: 82.4 kg at 2026-01-02T08:30:00.000"),
         "stdout: {}",
         run.stdout
     );
     assert!(
-        run.stdout
-            .contains("blood-pressure: 120/80 (pulse 72) at 2026-01-02T08:30:01.000"),
+        run.stdout.contains("blood-pressure: 120/80 (pulse 72) at 2026-01-02T08:30:01.000"),
         "stdout: {}",
         run.stdout
     );
@@ -211,11 +200,7 @@ fn dry_run_follows_pagination_until_more_is_zero() {
     assert_eq!(reads.len(), 2, "{:#?}", withings.requests());
     assert_eq!(form_value(&parse_form(&reads[0].body), "offset"), "0");
     assert_eq!(form_value(&parse_form(&reads[1].body), "offset"), "5");
-    assert!(
-        run.stdout.contains("would write 2 weight"),
-        "stdout: {}",
-        run.stdout
-    );
+    assert!(run.stdout.contains("would write 2 weight"), "stdout: {}", run.stdout);
     assert!(run.stdout.contains("80"), "stdout: {}", run.stdout);
     assert!(run.stdout.contains("81"), "stdout: {}", run.stdout);
 }
@@ -227,23 +212,15 @@ fn sync_since_until_flags_bound_the_window() {
     let withings = single_page_withings(vec![]);
     let garmin = ok_garmin();
 
-    let run = run_sync(
-        &dir,
-        &["--since", "2026-01-01", "--until", "2026-02-01"],
-        &withings,
-        &garmin,
-    );
+    let run =
+        run_sync(&dir, &["--since", "2026-01-01", "--until", "2026-02-01"], &withings, &garmin);
 
     assert_eq!(run.code, 0, "stderr: {}", run.stderr);
     let reads = withings.requests_for("POST", "/measure");
     let fields = parse_form(&reads[0].body);
     assert_eq!(form_value(&fields, "startdate"), JAN1.to_string());
     assert_eq!(form_value(&fields, "enddate"), FEB1.to_string());
-    assert!(
-        run.stdout.contains("2026-01-01..2026-02-01"),
-        "stdout: {}",
-        run.stdout
-    );
+    assert!(run.stdout.contains("2026-01-01..2026-02-01"), "stdout: {}", run.stdout);
 }
 
 #[test]
@@ -277,21 +254,9 @@ fn sync_weight_reads_only_the_weight_meastype() {
     assert_eq!(reads.len(), 1, "{:#?}", withings.requests());
     assert_eq!(form_value(&parse_form(&reads[0].body), "meastypes"), "1");
     // The report names weight only.
-    assert!(
-        run.stdout.contains("would write 1 weight measurements"),
-        "stdout: {}",
-        run.stdout
-    );
-    assert!(
-        !run.stdout.contains("blood-pressure"),
-        "stdout: {}",
-        run.stdout
-    );
-    assert!(
-        run.stdout.contains("summary: weight dry-run complete"),
-        "stdout: {}",
-        run.stdout
-    );
+    assert!(run.stdout.contains("would write 1 weight measurements"), "stdout: {}", run.stdout);
+    assert!(!run.stdout.contains("blood-pressure"), "stdout: {}", run.stdout);
+    assert!(run.stdout.contains("summary: weight dry-run complete"), "stdout: {}", run.stdout);
 }
 
 #[test]
@@ -306,20 +271,15 @@ fn sync_bp_reads_only_the_bp_meastypes() {
     assert_eq!(run.code, 0, "stderr: {}", run.stderr);
     let reads = withings.requests_for("POST", "/measure");
     assert_eq!(reads.len(), 1, "{:#?}", withings.requests());
-    assert_eq!(
-        form_value(&parse_form(&reads[0].body), "meastypes"),
-        "9,10,11"
-    );
+    assert_eq!(form_value(&parse_form(&reads[0].body), "meastypes"), "9,10,11");
     assert!(
-        run.stdout
-            .contains("would write 1 blood-pressure measurements"),
+        run.stdout.contains("would write 1 blood-pressure measurements"),
         "stdout: {}",
         run.stdout
     );
     assert!(!run.stdout.contains("weight"), "stdout: {}", run.stdout);
     assert!(
-        run.stdout
-            .contains("summary: blood-pressure dry-run complete"),
+        run.stdout.contains("summary: blood-pressure dry-run complete"),
         "stdout: {}",
         run.stdout
     );
@@ -338,19 +298,12 @@ fn bare_sync_requests_the_same_meastypes_as_sync_all() {
     assert_eq!(bare.code, 0, "stderr: {}", bare.stderr);
     assert_eq!(all.code, 0, "stderr: {}", all.stderr);
     for run in [&bare, &all] {
-        assert!(
-            run.stdout.contains("summary: dry-run complete"),
-            "stdout: {}",
-            run.stdout
-        );
+        assert!(run.stdout.contains("summary: dry-run complete"), "stdout: {}", run.stdout);
     }
     let reads = withings.requests_for("POST", "/measure");
     assert_eq!(reads.len(), 2, "{:#?}", withings.requests());
     for read in &reads {
-        assert_eq!(
-            form_value(&parse_form(&read.body), "meastypes"),
-            "1,9,10,11"
-        );
+        assert_eq!(form_value(&parse_form(&read.body), "meastypes"), "1,9,10,11");
     }
 }
 
@@ -365,9 +318,7 @@ fn sync_weight_apply_never_touches_the_bp_endpoints() {
 
     assert_eq!(run.code, 0, "stderr: {}", run.stderr);
     assert_eq!(
-        garmin
-            .requests_for("POST", "/weight-service/user-weight")
-            .len(),
+        garmin.requests_for("POST", "/weight-service/user-weight").len(),
         1,
         "{:#?}",
         garmin.requests()
@@ -379,21 +330,12 @@ fn sync_weight_apply_never_touches_the_bp_endpoints() {
         .count();
     assert_eq!(bp_requests, 0, "{:#?}", garmin.requests());
     assert!(
-        run.stdout
-            .contains("weight: 1 written, 0 skipped, 0 failed"),
+        run.stdout.contains("weight: 1 written, 0 skipped, 0 failed"),
         "stdout: {}",
         run.stdout
     );
-    assert!(
-        !run.stdout.contains("blood-pressure"),
-        "stdout: {}",
-        run.stdout
-    );
-    assert!(
-        run.stdout.contains("summary: weight synced"),
-        "stdout: {}",
-        run.stdout
-    );
+    assert!(!run.stdout.contains("blood-pressure"), "stdout: {}", run.stdout);
+    assert!(run.stdout.contains("summary: weight synced"), "stdout: {}", run.stdout);
 }
 
 #[test]
@@ -407,9 +349,7 @@ fn sync_bp_apply_never_touches_the_weight_endpoint() {
 
     assert_eq!(run.code, 0, "stderr: {}", run.stderr);
     assert_eq!(
-        garmin
-            .requests_for("POST", "/weight-service/user-weight")
-            .len(),
+        garmin.requests_for("POST", "/weight-service/user-weight").len(),
         0,
         "{:#?}",
         garmin.requests()
@@ -420,32 +360,23 @@ fn sync_bp_apply_never_touches_the_weight_endpoint() {
         .requests()
         .into_iter()
         .filter(|r| {
-            r.method == "GET"
-                && r.path
-                    .starts_with("/bloodpressure-service/bloodpressure/range")
+            r.method == "GET" && r.path.starts_with("/bloodpressure-service/bloodpressure/range")
         })
         .count();
     assert_eq!(bp_reads, 0, "{:#?}", garmin.requests());
     assert_eq!(
-        garmin
-            .requests_for("POST", "/bloodpressure-service/bloodpressure")
-            .len(),
+        garmin.requests_for("POST", "/bloodpressure-service/bloodpressure").len(),
         1,
         "{:#?}",
         garmin.requests()
     );
     assert!(
-        run.stdout
-            .contains("blood-pressure: 1 written, 0 skipped, 0 failed"),
+        run.stdout.contains("blood-pressure: 1 written, 0 skipped, 0 failed"),
         "stdout: {}",
         run.stdout
     );
     assert!(!run.stdout.contains("weight"), "stdout: {}", run.stdout);
-    assert!(
-        run.stdout.contains("summary: blood-pressure synced"),
-        "stdout: {}",
-        run.stdout
-    );
+    assert!(run.stdout.contains("summary: blood-pressure synced"), "stdout: {}", run.stdout);
 }
 
 #[test]
@@ -459,22 +390,16 @@ fn sync_all_reports_both_metrics_like_bare_sync() {
 
     assert_eq!(run.code, 0, "stderr: {}", run.stderr);
     assert!(
-        run.stdout
-            .contains("weight: 1 written, 0 skipped, 0 failed"),
+        run.stdout.contains("weight: 1 written, 0 skipped, 0 failed"),
         "stdout: {}",
         run.stdout
     );
     assert!(
-        run.stdout
-            .contains("blood-pressure: 0 written, 0 skipped, 0 failed"),
+        run.stdout.contains("blood-pressure: 0 written, 0 skipped, 0 failed"),
         "stdout: {}",
         run.stdout
     );
-    assert!(
-        run.stdout.contains("summary: all metrics synced"),
-        "stdout: {}",
-        run.stdout
-    );
+    assert!(run.stdout.contains("summary: all metrics synced"), "stdout: {}", run.stdout);
 }
 
 // ---------------------------------------------------------------------------
@@ -497,23 +422,11 @@ fn apply_writes_weight_and_bp_with_native_headers() {
 
     let weight_calls = garmin.requests_for("POST", "/weight-service/user-weight");
     assert_eq!(weight_calls.len(), 1, "{:#?}", garmin.requests());
-    assert_eq!(
-        weight_calls[0].header("authorization").unwrap(),
-        "Bearer ga"
-    );
-    assert_eq!(
-        weight_calls[0].header("user-agent").unwrap(),
-        "GCM-Android-5.23"
-    );
-    assert_eq!(
-        weight_calls[0].header("x-garmin-client-platform").unwrap(),
-        "Android"
-    );
+    assert_eq!(weight_calls[0].header("authorization").unwrap(), "Bearer ga");
+    assert_eq!(weight_calls[0].header("user-agent").unwrap(), "GCM-Android-5.23");
+    assert_eq!(weight_calls[0].header("x-garmin-client-platform").unwrap(), "Android");
     assert!(
-        weight_calls[0]
-            .header("content-type")
-            .unwrap()
-            .contains("application/json"),
+        weight_calls[0].header("content-type").unwrap().contains("application/json"),
         "content-type: {:?}",
         weight_calls[0].header("content-type")
     );
@@ -547,22 +460,16 @@ fn apply_writes_weight_and_bp_with_native_headers() {
 
     // The report counts and one-line summary.
     assert!(
-        run.stdout
-            .contains("weight: 1 written, 0 skipped, 0 failed"),
+        run.stdout.contains("weight: 1 written, 0 skipped, 0 failed"),
         "stdout: {}",
         run.stdout
     );
     assert!(
-        run.stdout
-            .contains("blood-pressure: 1 written, 0 skipped, 0 failed"),
+        run.stdout.contains("blood-pressure: 1 written, 0 skipped, 0 failed"),
         "stdout: {}",
         run.stdout
     );
-    assert!(
-        run.stdout.contains("summary: all metrics synced"),
-        "stdout: {}",
-        run.stdout
-    );
+    assert!(run.stdout.contains("summary: all metrics synced"), "stdout: {}", run.stdout);
 }
 
 #[test]
@@ -581,11 +488,8 @@ fn apply_weight_write_sends_exact_header_set_without_extras() {
     // The exact header set the write path sends (plus the HTTP-level headers
     // reqwest/hyper add: host and content-length). Anything else here is an
     // extra Garmin never saw in the spike's proven curl.
-    let mut names: Vec<String> = weight_calls[0]
-        .headers
-        .iter()
-        .map(|(name, _)| name.to_ascii_lowercase())
-        .collect();
+    let mut names: Vec<String> =
+        weight_calls[0].headers.iter().map(|(name, _)| name.to_ascii_lowercase()).collect();
     names.sort();
     // Deliberately no dedup: a duplicate header line (e.g. Content-Type sent
     // twice) must fail this test — Garmin's edge rejects it with a 400.
@@ -604,40 +508,18 @@ fn apply_weight_write_sends_exact_header_set_without_extras() {
         "x-gcexperience",
         "x-lang",
     ];
-    assert_eq!(
-        names,
-        expected.to_vec(),
-        "unexpected header set: {:#?}",
-        weight_calls[0].headers
-    );
+    assert_eq!(names, expected.to_vec(), "unexpected header set: {:#?}", weight_calls[0].headers);
 
     // The required values, exactly as the spike's working curl sent them.
-    assert_eq!(
-        weight_calls[0].header("user-agent").unwrap(),
-        "GCM-Android-5.23"
-    );
+    assert_eq!(weight_calls[0].header("user-agent").unwrap(), "GCM-Android-5.23");
     assert_eq!(weight_calls[0].header("x-app-ver").unwrap(), "10861");
-    assert_eq!(
-        weight_calls[0]
-            .header("x-garmin-paired-app-version")
-            .unwrap(),
-        "10861"
-    );
-    assert_eq!(
-        weight_calls[0].header("x-garmin-client-platform").unwrap(),
-        "Android"
-    );
+    assert_eq!(weight_calls[0].header("x-garmin-paired-app-version").unwrap(), "10861");
+    assert_eq!(weight_calls[0].header("x-garmin-client-platform").unwrap(), "Android");
     assert_eq!(weight_calls[0].header("x-lang").unwrap(), "en");
     assert_eq!(weight_calls[0].header("x-gcexperience").unwrap(), "GC5");
-    assert_eq!(
-        weight_calls[0].header("accept").unwrap(),
-        "application/json"
-    );
+    assert_eq!(weight_calls[0].header("accept").unwrap(), "application/json");
     assert!(
-        weight_calls[0]
-            .header("content-type")
-            .unwrap()
-            .starts_with("application/json"),
+        weight_calls[0].header("content-type").unwrap().starts_with("application/json"),
         "content-type: {:?}",
         weight_calls[0].header("content-type")
     );
@@ -721,11 +603,8 @@ fn apply_writes_send_exact_headers_and_bodies_for_both_endpoints() {
         assert_eq!(calls.len(), 1, "{label}: {:#?}", garmin.requests());
         let request = &calls[0];
 
-        let mut names: Vec<String> = request
-            .headers
-            .iter()
-            .map(|(name, _)| name.to_ascii_lowercase())
-            .collect();
+        let mut names: Vec<String> =
+            request.headers.iter().map(|(name, _)| name.to_ascii_lowercase()).collect();
         names.sort();
         // Deliberately no dedup: duplicate header lines must fail the test.
         assert_eq!(names.len(), request.headers.len(), "{label}: duplicates");
@@ -740,10 +619,7 @@ fn apply_writes_send_exact_headers_and_bodies_for_both_endpoints() {
             assert_eq!(request.header(name), Some(value), "{label}: header {name}");
         }
         assert!(
-            request
-                .header("content-type")
-                .unwrap()
-                .starts_with("application/json"),
+            request.header("content-type").unwrap().starts_with("application/json"),
             "{label}: content-type: {:?}",
             request.header("content-type")
         );
@@ -795,9 +671,7 @@ fn apply_weight_write_raw_wire_bytes_match_proven_request() {
                 Err(e) => panic!("accept failed: {e}"),
             }
         };
-        stream
-            .set_read_timeout(Some(std::time::Duration::from_secs(10)))
-            .unwrap();
+        stream.set_read_timeout(Some(std::time::Duration::from_secs(10))).unwrap();
 
         let mut bytes: Vec<u8> = Vec::new();
         let mut buf = [0u8; 8192];
@@ -824,9 +698,7 @@ fn apply_weight_write_raw_wire_bytes_match_proven_request() {
             assert!(n > 0, "connection closed before the body arrived");
             bytes.extend_from_slice(&buf[..n]);
         }
-        stream
-            .write_all(b"HTTP/1.1 204 No Content\r\ncontent-length: 0\r\n\r\n")
-            .unwrap();
+        stream.write_all(b"HTTP/1.1 204 No Content\r\ncontent-length: 0\r\n\r\n").unwrap();
         bytes
     });
 
@@ -836,20 +708,11 @@ fn apply_weight_write_raw_wire_bytes_match_proven_request() {
         ("WGS_GARMIN_API_BASE", raw_base.as_str()),
         ("TZ", "UTC"),
     ];
-    let full: Vec<&str> = vec![
-        "sync",
-        "--config-dir",
-        dir.path().to_str().unwrap(),
-        "--apply",
-    ];
+    let full: Vec<&str> = vec!["sync", "--config-dir", dir.path().to_str().unwrap(), "--apply"];
     let run = run_bin(&full, &env);
     let bytes = server.join().unwrap();
 
-    assert_eq!(
-        run.code, 0,
-        "stdout: {}\nstderr: {}",
-        run.stdout, run.stderr
-    );
+    assert_eq!(run.code, 0, "stdout: {}\nstderr: {}", run.stdout, run.stderr);
     let text = String::from_utf8(bytes).unwrap();
 
     // Request line, verbatim.
@@ -860,11 +723,8 @@ fn apply_weight_write_raw_wire_bytes_match_proven_request() {
     );
 
     // Every header line on the wire, verbatim: the exact set, nothing extra.
-    let header_lines: Vec<&str> = text
-        .split("\r\n")
-        .skip(1)
-        .take_while(|line| !line.is_empty())
-        .collect();
+    let header_lines: Vec<&str> =
+        text.split("\r\n").skip(1).take_while(|line| !line.is_empty()).collect();
     let mut names: Vec<String> = header_lines
         .iter()
         .map(|line| line.split(':').next().unwrap().trim().to_ascii_lowercase())
@@ -884,11 +744,7 @@ fn apply_weight_write_raw_wire_bytes_match_proven_request() {
         "x-gcexperience",
         "x-lang",
     ];
-    assert_eq!(
-        names,
-        expected_names.to_vec(),
-        "wire header lines: {header_lines:?}"
-    );
+    assert_eq!(names, expected_names.to_vec(), "wire header lines: {header_lines:?}");
 
     let expected_values: [(&str, &str); 10] = [
         ("authorization", "Bearer ga"),
@@ -908,29 +764,14 @@ fn apply_weight_write_raw_wire_bytes_match_proven_request() {
     for (name, value) in expected_values {
         let line = header_lines
             .iter()
-            .find(|line| {
-                line.split_once(':')
-                    .unwrap()
-                    .0
-                    .trim()
-                    .eq_ignore_ascii_case(name)
-            })
+            .find(|line| line.split_once(':').unwrap().0.trim().eq_ignore_ascii_case(name))
             .unwrap_or_else(|| panic!("missing wire header {name}: {header_lines:?}"));
-        assert_eq!(
-            line.split_once(':').unwrap().1.trim(),
-            value,
-            "wire header {name}"
-        );
+        assert_eq!(line.split_once(':').unwrap().1.trim(), value, "wire header {name}");
     }
     assert_eq!(
         header_lines
             .iter()
-            .find(|l| l
-                .split_once(':')
-                .unwrap()
-                .0
-                .trim()
-                .eq_ignore_ascii_case("host"))
+            .find(|l| l.split_once(':').unwrap().0.trim().eq_ignore_ascii_case("host"))
             .unwrap()
             .split_once(':')
             .unwrap()
@@ -954,12 +795,7 @@ fn apply_weight_write_raw_wire_bytes_match_proven_request() {
     assert_eq!(
         header_lines
             .iter()
-            .find(|l| l
-                .split_once(':')
-                .unwrap()
-                .0
-                .trim()
-                .eq_ignore_ascii_case("content-length"))
+            .find(|l| l.split_once(':').unwrap().0.trim().eq_ignore_ascii_case("content-length"))
             .unwrap()
             .split_once(':')
             .unwrap()
@@ -1003,21 +839,12 @@ fn apply_skips_out_of_range_bp_with_warning() {
     let run = run_sync(&dir, &["--apply"], &withings, &garmin);
 
     assert_eq!(run.code, 0, "stderr: {}", run.stderr);
-    assert!(
-        run.stderr.contains("out of range"),
-        "stderr: {}",
-        run.stderr
-    );
-    assert!(
-        run.stderr.contains("300") && run.stderr.contains("20"),
-        "stderr: {}",
-        run.stderr
-    );
+    assert!(run.stderr.contains("out of range"), "stderr: {}", run.stderr);
+    assert!(run.stderr.contains("300") && run.stderr.contains("20"), "stderr: {}", run.stderr);
     let bp_calls = garmin.requests_for("POST", "/bloodpressure-service/bloodpressure");
     assert_eq!(bp_calls.len(), 0, "{:#?}", garmin.requests());
     assert!(
-        run.stdout
-            .contains("blood-pressure: 0 written, 3 skipped, 0 failed"),
+        run.stdout.contains("blood-pressure: 0 written, 3 skipped, 0 failed"),
         "stdout: {}",
         run.stdout
     );
@@ -1032,9 +859,7 @@ fn apply_metrics_are_independent_weight_failure_does_not_block_bp() {
         bp_group(120, 80, Some(72), EPOCH + 1),
     ]);
     let garmin = FakeServer::start(vec![
-        Route::post("/weight-service/user-weight", |_req, _i| {
-            FakeResponse::new(500, "boom")
-        }),
+        Route::post("/weight-service/user-weight", |_req, _i| FakeResponse::new(500, "boom")),
         Route::post("/bloodpressure-service/bloodpressure", |_req, _i| {
             FakeResponse::json(200, "{}")
         }),
@@ -1044,38 +869,26 @@ fn apply_metrics_are_independent_weight_failure_does_not_block_bp() {
 
     // Partial failure -> exit 1, but the BP write still went through.
     assert_eq!(run.code, 1, "stdout: {}", run.stdout);
-    assert_eq!(
-        garmin
-            .requests_for("POST", "/bloodpressure-service/bloodpressure")
-            .len(),
-        1
-    );
+    assert_eq!(garmin.requests_for("POST", "/bloodpressure-service/bloodpressure").len(), 1);
     assert!(
-        run.stdout
-            .contains("weight: 0 written, 0 skipped, 1 failed"),
+        run.stdout.contains("weight: 0 written, 0 skipped, 1 failed"),
         "stdout: {}",
         run.stdout
     );
     assert!(
-        run.stdout
-            .contains("blood-pressure: 1 written, 0 skipped, 0 failed"),
+        run.stdout.contains("blood-pressure: 1 written, 0 skipped, 0 failed"),
         "stdout: {}",
         run.stdout
     );
-    assert!(
-        run.stdout.contains("summary: 1 metric(s) failed"),
-        "stdout: {}",
-        run.stdout
-    );
+    assert!(run.stdout.contains("summary: 1 metric(s) failed"), "stdout: {}", run.stdout);
 }
 
 #[test]
 fn sync_withings_read_failure_exits_1() {
     let dir = TempDir::new();
     write_valid_config_and_tokens(dir.path());
-    let withings = FakeServer::start(vec![Route::post("/measure", |_req, _i| {
-        FakeResponse::new(500, "boom")
-    })]);
+    let withings =
+        FakeServer::start(vec![Route::post("/measure", |_req, _i| FakeResponse::new(500, "boom"))]);
     let garmin = ok_garmin();
 
     let run = run_sync(&dir, &["--apply"], &withings, &garmin);
@@ -1108,8 +921,7 @@ fn sync_bp_without_pairing_is_skipped_with_warning() {
         run.stderr
     );
     assert!(
-        run.stdout
-            .contains("blood-pressure: 0 written, 1 skipped, 0 failed"),
+        run.stdout.contains("blood-pressure: 0 written, 1 skipped, 0 failed"),
         "stdout: {}",
         run.stdout
     );

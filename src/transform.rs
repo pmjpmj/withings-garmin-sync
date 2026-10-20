@@ -6,7 +6,7 @@
 //! diastolic are both present, and any component outside Garmin's validation
 //! ranges skips the whole reading with a warning.
 
-use crate::withings::{decode_value, MeasureGroup, RawMeasure};
+use crate::withings::{MeasureGroup, RawMeasure, decode_value};
 
 /// Garmin's validation ranges (inclusive).
 pub const SYSTOLIC_MIN: f64 = 70.0;
@@ -62,11 +62,9 @@ pub fn transform(groups: Vec<MeasureGroup>) -> (Vec<WeightReading>, Vec<BpReadin
                 reading.epoch = group.date;
                 bps.push(reading);
             }
-            Some(Err(reason)) => skips.push(Skip {
-                metric: Metric::BloodPressure,
-                epoch: group.date,
-                reason,
-            }),
+            Some(Err(reason)) => {
+                skips.push(Skip { metric: Metric::BloodPressure, epoch: group.date, reason })
+            }
         }
     }
 
@@ -96,9 +94,7 @@ fn pair_blood_pressure(measures: &[RawMeasure]) -> Option<Result<BpReading, Stri
     }
 
     let (Some(systolic), Some(diastolic)) = (systolic, diastolic) else {
-        return Some(Err(
-            "blood-pressure group lacks paired systolic and diastolic".to_string(),
-        ));
+        return Some(Err("blood-pressure group lacks paired systolic and diastolic".to_string()));
     };
 
     if !(SYSTOLIC_MIN..=SYSTOLIC_MAX).contains(&systolic) {
@@ -111,20 +107,13 @@ fn pair_blood_pressure(measures: &[RawMeasure]) -> Option<Result<BpReading, Stri
             "diastolic {diastolic} out of range ({DIASTOLIC_MIN}..{DIASTOLIC_MAX})"
         )));
     }
-    if let Some(pulse) = pulse {
-        if !(PULSE_MIN..=PULSE_MAX).contains(&pulse) {
-            return Some(Err(format!(
-                "pulse {pulse} out of range ({PULSE_MIN}..{PULSE_MAX})"
-            )));
-        }
+    if let Some(pulse) = pulse
+        && !(PULSE_MIN..=PULSE_MAX).contains(&pulse)
+    {
+        return Some(Err(format!("pulse {pulse} out of range ({PULSE_MIN}..{PULSE_MAX})")));
     }
 
-    Some(Ok(BpReading {
-        systolic,
-        diastolic,
-        pulse,
-        epoch: 0,
-    }))
+    Some(Ok(BpReading { systolic, diastolic, pulse, epoch: 0 }))
 }
 
 /// Round to three decimals, guarding against float representation artifacts
@@ -139,19 +128,13 @@ mod tests {
     use super::*;
 
     fn measure(meastype: u32, value: i64, unit: i32) -> RawMeasure {
-        RawMeasure {
-            meastype,
-            value,
-            unit,
-        }
+        RawMeasure { meastype, value, unit }
     }
 
     #[test]
     fn weight_decodes_to_kg_and_rounds() {
-        let (weights, bps, skips) = transform(vec![MeasureGroup {
-            date: 100,
-            measures: vec![measure(1, 82456, -3)],
-        }]);
+        let (weights, bps, skips) =
+            transform(vec![MeasureGroup { date: 100, measures: vec![measure(1, 82456, -3)] }]);
         assert_eq!(weights.len(), 1);
         assert_eq!(weights[0].kg, 82.456);
         assert!(bps.is_empty());
@@ -174,14 +157,8 @@ mod tests {
     #[test]
     fn bp_group_without_pair_skipped_but_weight_group_untouched() {
         let (weights, bps, skips) = transform(vec![
-            MeasureGroup {
-                date: 200,
-                measures: vec![measure(10, 120, 0)],
-            },
-            MeasureGroup {
-                date: 300,
-                measures: vec![measure(1, 80000, -3)],
-            },
+            MeasureGroup { date: 200, measures: vec![measure(10, 120, 0)] },
+            MeasureGroup { date: 300, measures: vec![measure(1, 80000, -3)] },
         ]);
         assert!(bps.is_empty());
         assert_eq!(weights.len(), 1);
@@ -193,14 +170,8 @@ mod tests {
     #[test]
     fn out_of_range_components_skip_whole_reading() {
         let (_w, bps, skips) = transform(vec![
-            MeasureGroup {
-                date: 200,
-                measures: vec![measure(10, 300, 0), measure(9, 80, 0)],
-            },
-            MeasureGroup {
-                date: 210,
-                measures: vec![measure(10, 120, 0), measure(9, 20, 0)],
-            },
+            MeasureGroup { date: 200, measures: vec![measure(10, 300, 0), measure(9, 80, 0)] },
+            MeasureGroup { date: 210, measures: vec![measure(10, 120, 0), measure(9, 20, 0)] },
             MeasureGroup {
                 date: 220,
                 measures: vec![measure(10, 120, 0), measure(9, 80, 0), measure(11, 500, 0)],
@@ -225,14 +196,8 @@ mod tests {
     #[test]
     fn readings_come_back_time_ordered() {
         let (weights, _bps, _skips) = transform(vec![
-            MeasureGroup {
-                date: 500,
-                measures: vec![measure(1, 80000, -3)],
-            },
-            MeasureGroup {
-                date: 100,
-                measures: vec![measure(1, 81000, -3)],
-            },
+            MeasureGroup { date: 500, measures: vec![measure(1, 80000, -3)] },
+            MeasureGroup { date: 100, measures: vec![measure(1, 81000, -3)] },
         ]);
         assert_eq!(weights[0].epoch, 100);
         assert_eq!(weights[1].epoch, 500);

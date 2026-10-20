@@ -7,8 +7,8 @@
 mod common;
 
 use common::{
-    run_bin, write_file, write_valid_config_and_tokens, FakeResponse, FakeServer, Route, TempDir,
-    VALID_CONFIG,
+    FakeResponse, FakeServer, Route, TempDir, VALID_CONFIG, run_bin, write_file,
+    write_valid_config_and_tokens,
 };
 
 #[test]
@@ -20,19 +20,8 @@ fn help_lists_subcommands_and_flags() {
 
     let run = run_bin(&["sync", "--help"], &[]);
     assert_eq!(run.code, 0, "stderr: {}", run.stderr);
-    for flag in [
-        "--apply",
-        "--dry-run",
-        "--since",
-        "--until",
-        "--config-dir",
-        "--verbose",
-    ] {
-        assert!(
-            run.stdout.contains(flag),
-            "missing {flag} in help: {}",
-            run.stdout
-        );
+    for flag in ["--apply", "--dry-run", "--since", "--until", "--config-dir", "--verbose"] {
+        assert!(run.stdout.contains(flag), "missing {flag} in help: {}", run.stdout);
     }
 }
 
@@ -41,11 +30,7 @@ fn sync_help_lists_metric_subcommands() {
     let run = run_bin(&["sync", "--help"], &[]);
     assert_eq!(run.code, 0, "stderr: {}", run.stderr);
     for sub in ["weight", "bp", "all"] {
-        assert!(
-            run.stdout.contains(sub),
-            "missing {sub} in help: {}",
-            run.stdout
-        );
+        assert!(run.stdout.contains(sub), "missing {sub} in help: {}", run.stdout);
     }
 }
 
@@ -54,11 +39,7 @@ fn sync_metric_subcommand_help_lists_flags() {
     let run = run_bin(&["sync", "weight", "--help"], &[]);
     assert_eq!(run.code, 0, "stderr: {}", run.stderr);
     for flag in ["--apply", "--dry-run", "--since", "--until"] {
-        assert!(
-            run.stdout.contains(flag),
-            "missing {flag} in help: {}",
-            run.stdout
-        );
+        assert!(run.stdout.contains(flag), "missing {flag} in help: {}", run.stdout);
     }
 }
 
@@ -75,11 +56,7 @@ fn sync_flags_conflict_with_metric_subcommands() {
     // the subcommand is rejected loudly rather than silently ignored.
     let run = run_bin(&["sync", "--apply", "weight"], &[]);
     assert_eq!(run.code, 2);
-    assert!(
-        run.stderr.contains("cannot be used with"),
-        "stderr: {}",
-        run.stderr
-    );
+    assert!(run.stderr.contains("cannot be used with"), "stderr: {}", run.stderr);
 }
 
 #[test]
@@ -115,16 +92,8 @@ fn sync_with_missing_config_exits_3_and_says_run_auth_first() {
     let dir = TempDir::new();
     let run = run_bin(&["sync", "--config-dir", dir.path().to_str().unwrap()], &[]);
     assert_eq!(run.code, 3);
-    assert!(
-        run.stderr.contains("run `auth` first"),
-        "stderr: {}",
-        run.stderr
-    );
-    assert!(
-        run.stderr.contains("config not found"),
-        "stderr: {}",
-        run.stderr
-    );
+    assert!(run.stderr.contains("run `auth` first"), "stderr: {}", run.stderr);
+    assert!(run.stderr.contains("config not found"), "stderr: {}", run.stderr);
 }
 
 #[test]
@@ -133,11 +102,7 @@ fn sync_with_invalid_toml_config_exits_3() {
     write_file(&dir.path().join("config.toml"), "this is not toml {{{");
     let run = run_bin(&["sync", "--config-dir", dir.path().to_str().unwrap()], &[]);
     assert_eq!(run.code, 3);
-    assert!(
-        run.stderr.contains("run `auth` first"),
-        "stderr: {}",
-        run.stderr
-    );
+    assert!(run.stderr.contains("run `auth` first"), "stderr: {}", run.stderr);
 }
 
 #[test]
@@ -158,16 +123,8 @@ fn sync_with_missing_tokens_exits_3() {
     write_file(&dir.path().join("config.toml"), VALID_CONFIG);
     let run = run_bin(&["sync", "--config-dir", dir.path().to_str().unwrap()], &[]);
     assert_eq!(run.code, 3);
-    assert!(
-        run.stderr.contains("run `auth` first"),
-        "stderr: {}",
-        run.stderr
-    );
-    assert!(
-        run.stderr.contains("tokens not found"),
-        "stderr: {}",
-        run.stderr
-    );
+    assert!(run.stderr.contains("run `auth` first"), "stderr: {}", run.stderr);
+    assert!(run.stderr.contains("tokens not found"), "stderr: {}", run.stderr);
 }
 
 #[test]
@@ -177,16 +134,8 @@ fn sync_with_invalid_tokens_exits_3() {
     write_file(&dir.path().join("tokens.json"), "not json");
     let run = run_bin(&["sync", "--config-dir", dir.path().to_str().unwrap()], &[]);
     assert_eq!(run.code, 3);
-    assert!(
-        run.stderr.contains("run `auth` first"),
-        "stderr: {}",
-        run.stderr
-    );
-    assert!(
-        run.stderr.contains("invalid tokens"),
-        "stderr: {}",
-        run.stderr
-    );
+    assert!(run.stderr.contains("run `auth` first"), "stderr: {}", run.stderr);
+    assert!(run.stderr.contains("invalid tokens"), "stderr: {}", run.stderr);
 }
 
 /// A Withings fake with an empty measurement page, so `sync` tests that
@@ -233,11 +182,7 @@ fn sync_apply_flag_is_accepted() {
     );
     assert_eq!(run.code, 0, "stderr: {}", run.stderr);
     assert!(run.stdout.contains("apply"), "stdout: {}", run.stdout);
-    assert!(
-        run.stdout.contains("2026-01-01..2026-02-01"),
-        "stdout: {}",
-        run.stdout
-    );
+    assert!(run.stdout.contains("2026-01-01..2026-02-01"), "stdout: {}", run.stdout);
 }
 
 #[test]
@@ -246,12 +191,7 @@ fn base_url_overrides_flow_into_the_http_client() {
     write_valid_config_and_tokens(dir.path());
     let withings = empty_withings();
     let run = run_bin(
-        &[
-            "sync",
-            "--verbose",
-            "--config-dir",
-            dir.path().to_str().unwrap(),
-        ],
+        &["sync", "--verbose", "--config-dir", dir.path().to_str().unwrap()],
         &[
             ("WGS_WITHINGS_API_BASE", withings.base_url.as_str()),
             ("WGS_GARMIN_SSO_BASE", "http://127.0.0.1:10002"),
@@ -261,26 +201,22 @@ fn base_url_overrides_flow_into_the_http_client() {
     );
     assert_eq!(run.code, 0, "stderr: {}", run.stderr);
     assert!(
-        run.stderr
-            .contains(&format!("withings_api  = {}", withings.base_url)),
+        run.stderr.contains(&format!("withings_api  = {}", withings.base_url)),
         "stderr: {}",
         run.stderr
     );
     assert!(
-        run.stderr
-            .contains("garmin_sso    = http://127.0.0.1:10002"),
+        run.stderr.contains("garmin_sso    = http://127.0.0.1:10002"),
         "stderr: {}",
         run.stderr
     );
     assert!(
-        run.stderr
-            .contains("garmin_diauth = http://127.0.0.1:10003"),
+        run.stderr.contains("garmin_diauth = http://127.0.0.1:10003"),
         "stderr: {}",
         run.stderr
     );
     assert!(
-        run.stderr
-            .contains("garmin_api    = http://127.0.0.1:10004"),
+        run.stderr.contains("garmin_api    = http://127.0.0.1:10004"),
         "stderr: {}",
         run.stderr
     );

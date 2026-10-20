@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use crate::{config, timefmt, AppError};
+use crate::{AppError, config, timefmt};
 
 /// The token document and its persistence location for one command run.
 pub struct Session {
@@ -10,19 +10,13 @@ pub struct Session {
 
 impl Session {
     pub fn load(dir: &Path) -> Result<Self, AppError> {
-        Ok(Self {
-            tokens: config::load_tokens(dir)?,
-            path: config::tokens_path(dir),
-        })
+        Ok(Self { tokens: config::load_tokens(dir)?, path: config::tokens_path(dir) })
     }
 
     pub fn load_or_default(dir: &Path) -> Result<Self, AppError> {
         let path = config::tokens_path(dir);
-        let tokens = if path.exists() {
-            config::load_tokens(dir)?
-        } else {
-            config::Tokens::default()
-        };
+        let tokens =
+            if path.exists() { config::load_tokens(dir)? } else { config::Tokens::default() };
         Ok(Self { tokens, path })
     }
 
@@ -48,12 +42,7 @@ impl Session {
         client_secret: &str,
     ) -> Result<(), AppError> {
         let now = timefmt::now_epoch();
-        if self
-            .tokens
-            .withings
-            .expires_at
-            .is_some_and(|expires| expires > now as u64 + 60)
-        {
+        if self.tokens.withings.expires_at.is_some_and(|expires| expires > now as u64 + 60) {
             return Ok(());
         }
         self.refresh_withings(client, client_id, client_secret)
@@ -111,10 +100,9 @@ impl Session {
                 self.persist()?;
                 match operation(&self.tokens.garmin.access_token) {
                     Ok(value) => Ok(value),
-                    Err(crate::Fault::Unauthorized) => Err(AppError::new(
-                        crate::EXIT_METRIC_FAILURE,
-                        "unauthorized (HTTP 401)",
-                    )),
+                    Err(crate::Fault::Unauthorized) => {
+                        Err(AppError::new(crate::EXIT_METRIC_FAILURE, "unauthorized (HTTP 401)"))
+                    }
                     Err(crate::Fault::Failed(error)) => Err(error),
                 }
             }
@@ -136,10 +124,7 @@ impl Session {
         .map_err(|error| {
             AppError::new(
                 crate::EXIT_AUTH,
-                format!(
-                    "Withings token refresh failed: {}; re-run `auth withings`",
-                    error.message
-                ),
+                format!("Withings token refresh failed: {}; re-run `auth withings`", error.message),
             )
         })?;
         self.tokens.withings.access_token = refreshed.access_token;

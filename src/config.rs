@@ -20,10 +20,7 @@ impl Config {
     /// credentials (prompted for by `auth`) and default sync settings.
     pub fn skeleton() -> Self {
         Self {
-            withings: WithingsConfig {
-                client_id: String::new(),
-                client_secret: String::new(),
-            },
+            withings: WithingsConfig { client_id: String::new(), client_secret: String::new() },
             sync: SyncConfig::default(),
         }
     }
@@ -219,9 +216,7 @@ pub fn resolve_config_dir(override_path: Option<&Path>) -> Result<PathBuf, AppEr
     let home = std::env::var_os("HOME").ok_or_else(|| {
         AppError::config("HOME is not set; pass --config-dir to choose a config directory")
     })?;
-    Ok(PathBuf::from(home)
-        .join(".config")
-        .join("withings-garmin-sync"))
+    Ok(PathBuf::from(home).join(".config").join("withings-garmin-sync"))
 }
 
 pub fn config_path(dir: &Path) -> PathBuf {
@@ -255,10 +250,7 @@ pub fn load_config(dir: &Path) -> Result<Config, AppError> {
             }
         })?
         .ok_or_else(|| {
-            AppError::config(format!(
-                "config not found at {}; run `auth` first",
-                path.display()
-            ))
+            AppError::config(format!("config not found at {}; run `auth` first", path.display()))
         })?;
 
     if config.withings.client_id.trim().is_empty()
@@ -276,10 +268,7 @@ pub fn load_config(dir: &Path) -> Result<Config, AppError> {
 pub fn load_tokens(dir: &Path) -> Result<Tokens, AppError> {
     let path = tokens_path(dir);
     let text = fs::read_to_string(&path).map_err(|_| {
-        AppError::config(format!(
-            "tokens not found at {}; run `auth` first",
-            path.display()
-        ))
+        AppError::config(format!("tokens not found at {}; run `auth` first", path.display()))
     })?;
 
     let tokens: Tokens = serde_json::from_str(&text).map_err(|error| {
@@ -327,10 +316,7 @@ fn write_private(path: &Path, bytes: &[u8]) -> Result<(), AppError> {
 fn set_private_permissions(path: &Path) -> Result<(), AppError> {
     use std::os::unix::fs::PermissionsExt;
     fs::set_permissions(path, fs::Permissions::from_mode(0o600)).map_err(|error| {
-        AppError::config(format!(
-            "could not set 0600 permissions on {}: {error}",
-            path.display()
-        ))
+        AppError::config(format!("could not set 0600 permissions on {}: {error}", path.display()))
     })
 }
 
@@ -353,10 +339,7 @@ mod tests {
         let config = parse("[sync.weight]\nsince = \"2026-01-02T08:30:00Z\"\n");
         assert_eq!(config.sync.weight.since, Some(EPOCH));
         let text = toml::to_string_pretty(&config).unwrap();
-        assert!(
-            text.contains("since = \"2026-01-02T08:30:00Z\""),
-            "text: {text}"
-        );
+        assert!(text.contains("since = \"2026-01-02T08:30:00Z\""), "text: {text}");
         let again: Config = toml::from_str(&text).unwrap();
         assert_eq!(again.sync.weight.since, Some(EPOCH));
     }
@@ -366,10 +349,7 @@ mod tests {
         let config = parse("[sync.bp]\nsince = 1767342600\n");
         assert_eq!(config.sync.bp.since, Some(EPOCH));
         let text = toml::to_string_pretty(&config).unwrap();
-        assert!(
-            text.contains("since = \"2026-01-02T08:30:00Z\""),
-            "text: {text}"
-        );
+        assert!(text.contains("since = \"2026-01-02T08:30:00Z\""), "text: {text}");
     }
 
     #[test]
@@ -383,19 +363,13 @@ mod tests {
         assert_eq!(config.sync.weight.since, Some(EPOCH));
         assert_eq!(config.sync.bp.since, Some(EPOCH));
         let text = toml::to_string_pretty(&config).unwrap();
-        assert!(
-            text.contains("since = \"2026-01-02T08:30:00Z\""),
-            "text: {text}"
-        );
+        assert!(text.contains("since = \"2026-01-02T08:30:00Z\""), "text: {text}");
 
         // A plain date is midnight UTC.
         let config = parse("[sync.bp]\nsince = \"2026-01-02\"\n");
         assert_eq!(config.sync.bp.since, Some(MIDNIGHT));
         let text = toml::to_string_pretty(&config).unwrap();
-        assert!(
-            text.contains("since = \"2026-01-02T00:00:00Z\""),
-            "text: {text}"
-        );
+        assert!(text.contains("since = \"2026-01-02T00:00:00Z\""), "text: {text}");
     }
 
     #[test]
@@ -415,10 +389,7 @@ mod tests {
                 message.contains(&format!("sync.{metric}.since")),
                 "message for {metric}/{value:?}: {message}"
             );
-            assert!(
-                message.contains("RFC 3339"),
-                "message for {metric}/{value:?}: {message}"
-            );
+            assert!(message.contains("RFC 3339"), "message for {metric}/{value:?}: {message}");
         }
     }
 

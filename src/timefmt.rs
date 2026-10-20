@@ -12,10 +12,7 @@ use crate::AppError;
 /// `.SSS` values are accepted.
 pub fn local_ms(epoch: i64) -> String {
     match chrono::DateTime::from_timestamp(epoch, 0) {
-        Some(dt) => dt
-            .with_timezone(&chrono::Local)
-            .format("%Y-%m-%dT%H:%M:%S%.3f")
-            .to_string(),
+        Some(dt) => dt.with_timezone(&chrono::Local).format("%Y-%m-%dT%H:%M:%S%.3f").to_string(),
         None => String::new(),
     }
 }
@@ -24,10 +21,7 @@ pub fn local_ms(epoch: i64) -> String {
 /// [`local_ms`] for why the fractional seconds are required.
 pub fn gmt_ms(epoch: i64) -> String {
     match chrono::DateTime::from_timestamp(epoch, 0) {
-        Some(dt) => dt
-            .with_timezone(&chrono::Utc)
-            .format("%Y-%m-%dT%H:%M:%S%.3f")
-            .to_string(),
+        Some(dt) => dt.with_timezone(&chrono::Utc).format("%Y-%m-%dT%H:%M:%S%.3f").to_string(),
         None => String::new(),
     }
 }
@@ -35,16 +29,9 @@ pub fn gmt_ms(epoch: i64) -> String {
 /// Parse a `YYYY-MM-DD` date (interpreted as midnight UTC) into epoch seconds.
 pub fn parse_date(value: &str) -> Result<i64, AppError> {
     let date = NaiveDate::parse_from_str(value.trim(), "%Y-%m-%d").map_err(|_| {
-        AppError::new(
-            crate::EXIT_USAGE,
-            format!("invalid date {value:?}: expected YYYY-MM-DD"),
-        )
+        AppError::new(crate::EXIT_USAGE, format!("invalid date {value:?}: expected YYYY-MM-DD"))
     })?;
-    Ok(date
-        .and_hms_opt(0, 0, 0)
-        .expect("midnight is valid")
-        .and_utc()
-        .timestamp())
+    Ok(date.and_hms_opt(0, 0, 0).expect("midnight is valid").and_utc().timestamp())
 }
 
 /// Format epoch seconds as the canonical floor form (ADR-0009):
@@ -68,20 +55,20 @@ pub fn parse_floor(value: &str) -> Result<i64, AppError> {
 
     // Legacy integer epoch seconds; the DateTime check rejects values the
     // formatter cannot represent, so a loaded floor always round-trips.
-    if let Ok(epoch) = trimmed.parse::<i64>() {
-        if chrono::DateTime::from_timestamp(epoch, 0).is_some() {
-            return Ok(epoch);
-        }
+    if let Ok(epoch) = trimmed.parse::<i64>()
+        && chrono::DateTime::from_timestamp(epoch, 0).is_some()
+    {
+        return Ok(epoch);
     }
 
     // RFC 3339 datetime: offsets convert to the UTC instant, and the
     // timestamp's fractional part is dropped (toward the floor). chrono's
     // parser leniently accepts a space separator, so reject any whitespace
     // up front (the spec's accepted forms have none).
-    if !trimmed.chars().any(char::is_whitespace) {
-        if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(trimmed) {
-            return Ok(dt.timestamp());
-        }
+    if !trimmed.chars().any(char::is_whitespace)
+        && let Ok(dt) = chrono::DateTime::parse_from_rfc3339(trimmed)
+    {
+        return Ok(dt.timestamp());
     }
 
     // Plain date: midnight UTC, the same interpretation as --since/--until.
@@ -158,10 +145,7 @@ mod tests {
     #[test]
     fn parse_floor_accepts_plain_dates_as_midnight_utc() {
         assert_eq!(parse_floor("2026-01-02").unwrap(), 1767312000);
-        assert_eq!(
-            parse_floor("2026-01-02").unwrap(),
-            parse_date("2026-01-02").unwrap()
-        );
+        assert_eq!(parse_floor("2026-01-02").unwrap(), parse_date("2026-01-02").unwrap());
     }
 
     #[test]
@@ -173,26 +157,18 @@ mod tests {
     #[test]
     fn parse_floor_rejects_non_floor_values_naming_the_accepted_formats() {
         for bad in [
-            "2026-01-02T08:30:00",   // naive, no timezone
-            "2026-01-02 08:30:00Z",   // space separator
+            "2026-01-02T08:30:00",  // naive, no timezone
+            "2026-01-02 08:30:00Z", // space separator
             "junk",
-            "99999-01-01T00:00:00Z",  // out-of-range year
-            "2026-13-45",             // invalid date
-            "9223372036854775807",    // i64 epoch beyond DateTime's range
+            "99999-01-01T00:00:00Z", // out-of-range year
+            "2026-13-45",            // invalid date
+            "9223372036854775807",   // i64 epoch beyond DateTime's range
             "",
         ] {
             let error = parse_floor(bad).unwrap_err();
             assert_eq!(error.code, crate::EXIT_CONFIG);
-            assert!(
-                error.message.contains("RFC 3339"),
-                "message for {bad:?}: {}",
-                error.message
-            );
-            assert!(
-                error.message.contains("YYYY-MM-DD"),
-                "message for {bad:?}: {}",
-                error.message
-            );
+            assert!(error.message.contains("RFC 3339"), "message for {bad:?}: {}", error.message);
+            assert!(error.message.contains("YYYY-MM-DD"), "message for {bad:?}: {}", error.message);
         }
     }
 }

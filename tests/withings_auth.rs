@@ -8,8 +8,8 @@
 mod common;
 
 use common::{
-    file_mode, form_value, parse_form, run_bin_stdin, write_file, FakeResponse, FakeServer, Route,
-    TempDir,
+    FakeResponse, FakeServer, Route, TempDir, file_mode, form_value, parse_form, run_bin_stdin,
+    write_file,
 };
 
 fn write_config(dir: &TempDir) {
@@ -28,9 +28,7 @@ fn withings_token_server(tokens: &'static str) -> FakeServer {
 /// Minimal always-succeeding Garmin SSO + diauth pair.
 fn garmin_servers() -> (FakeServer, FakeServer) {
     let sso = FakeServer::start(vec![
-        Route::get("/mobile/sso/en_US/sign-in", |_req, _i| {
-            FakeResponse::new(200, "ok")
-        }),
+        Route::get("/mobile/sso/en_US/sign-in", |_req, _i| FakeResponse::new(200, "ok")),
         Route::post("/mobile/api/login", |_req, _i| {
             FakeResponse::json(
                 200,
@@ -38,15 +36,13 @@ fn garmin_servers() -> (FakeServer, FakeServer) {
             )
         }),
     ]);
-    let diauth = FakeServer::start(vec![Route::post(
-        "/di-oauth2-service/oauth/token",
-        |_req, _i| {
+    let diauth =
+        FakeServer::start(vec![Route::post("/di-oauth2-service/oauth/token", |_req, _i| {
             FakeResponse::json(
                 200,
                 r#"{"access_token": "di-access", "refresh_token": "di-refresh"}"#,
             )
-        },
-    )]);
+        })]);
     (sso, diauth)
 }
 
@@ -94,29 +90,15 @@ fn auth_prints_authorize_url_with_client_id_and_scope() {
 
     assert_eq!(run.code, 0, "stderr: {}", run.stderr);
     assert!(
-        run.stdout
-            .contains("https://account.withings.com/oauth2_user/authorize2"),
+        run.stdout.contains("https://account.withings.com/oauth2_user/authorize2"),
         "stdout: {}",
         run.stdout
     );
+    assert!(run.stdout.contains("response_type=code"), "stdout: {}", run.stdout);
+    assert!(run.stdout.contains("client_id=test-client-id"), "stdout: {}", run.stdout);
+    assert!(run.stdout.contains("scope=user.metrics"), "stdout: {}", run.stdout);
     assert!(
-        run.stdout.contains("response_type=code"),
-        "stdout: {}",
-        run.stdout
-    );
-    assert!(
-        run.stdout.contains("client_id=test-client-id"),
-        "stdout: {}",
-        run.stdout
-    );
-    assert!(
-        run.stdout.contains("scope=user.metrics"),
-        "stdout: {}",
-        run.stdout
-    );
-    assert!(
-        run.stdout
-            .contains("redirect_uri=http%3A%2F%2Flocalhost%3A8765%2F"),
+        run.stdout.contains("redirect_uri=http%3A%2F%2Flocalhost%3A8765%2F"),
         "stdout: {}",
         run.stdout
     );
@@ -147,10 +129,7 @@ fn auth_exchanges_pasted_code_and_persists_tokens() {
     assert_eq!(form_value(&fields, "client_id"), "test-client-id");
     assert_eq!(form_value(&fields, "client_secret"), "test-client-secret");
     assert_eq!(form_value(&fields, "code"), "abc123");
-    assert_eq!(
-        form_value(&fields, "redirect_uri"),
-        "http://localhost:8765/"
-    );
+    assert_eq!(form_value(&fields, "redirect_uri"), "http://localhost:8765/");
     assert_eq!(fields.len(), 6, "unexpected extra fields: {fields:?}");
 
     // Tokens land in tokens.json with 0600 permissions.
@@ -173,9 +152,7 @@ fn auth_rejects_a_mismatched_state_without_writing_tokens() {
     let run = run_bin_stdin(
         &["auth", "--config-dir", dir.path().to_str().unwrap()],
         &auth_env(&withings, &sso, &diauth),
-        Some(&auth_stdin(
-            "http://localhost:8765/?code=abc123&state=not-mine",
-        )),
+        Some(&auth_stdin("http://localhost:8765/?code=abc123&state=not-mine")),
     );
 
     assert_eq!(run.code, 4, "stdout: {}", run.stdout);
@@ -222,10 +199,7 @@ fn auth_rejected_code_exits_4_without_writing_tokens() {
         "stderr: {}",
         run.stderr
     );
-    assert!(
-        !dir.path().join("tokens.json").exists(),
-        "tokens.json must not be written on failure"
-    );
+    assert!(!dir.path().join("tokens.json").exists(), "tokens.json must not be written on failure");
 }
 
 #[test]
@@ -244,11 +218,7 @@ fn auth_http_error_exits_4_without_writing_tokens() {
     );
 
     assert_eq!(run.code, 4, "stdout: {}", run.stdout);
-    assert!(
-        run.stderr.to_lowercase().contains("500"),
-        "stderr: {}",
-        run.stderr
-    );
+    assert!(run.stderr.to_lowercase().contains("500"), "stderr: {}", run.stderr);
     assert!(!dir.path().join("tokens.json").exists());
 }
 
@@ -272,14 +242,8 @@ fn auth_prompts_for_missing_client_credentials_and_writes_config() {
     let config_path = dir.path().join("config.toml");
     assert_eq!(file_mode(&config_path), 0o600);
     let config = std::fs::read_to_string(&config_path).unwrap();
-    assert!(
-        config.contains(r#"client_id = "my-client-id""#),
-        "config: {config}"
-    );
-    assert!(
-        config.contains(r#"client_secret = "my-client-secret""#),
-        "config: {config}"
-    );
+    assert!(config.contains(r#"client_id = "my-client-id""#), "config: {config}");
+    assert!(config.contains(r#"client_secret = "my-client-secret""#), "config: {config}");
     let fields = parse_form(&withings.requests_for("POST", "/v2/oauth2")[0].body);
     assert_eq!(form_value(&fields, "client_id"), "my-client-id");
     assert_eq!(form_value(&fields, "client_secret"), "my-client-secret");
@@ -308,10 +272,7 @@ fn auth_overwrites_an_existing_token_file_without_error() {
             .unwrap();
     assert_eq!(tokens["garmin"]["access_token"], "di-access");
     assert_eq!(tokens["garmin"]["refresh_token"], "di-refresh");
-    assert_eq!(
-        tokens["garmin"]["client_id"],
-        "GARMIN_CONNECT_MOBILE_ANDROID_DI_2025Q2"
-    );
+    assert_eq!(tokens["garmin"]["client_id"], "GARMIN_CONNECT_MOBILE_ANDROID_DI_2025Q2");
     assert_eq!(tokens["withings"]["access_token"], "wa-access");
 }
 

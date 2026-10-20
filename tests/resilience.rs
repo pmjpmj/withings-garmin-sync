@@ -4,7 +4,7 @@
 mod common;
 
 use common::{
-    form_value, parse_form, run_bin, write_file, FakeResponse, FakeServer, Route, TempDir,
+    FakeResponse, FakeServer, Route, TempDir, form_value, parse_form, run_bin, write_file,
 };
 use serde_json::json;
 
@@ -117,10 +117,7 @@ fn expired_withings_token_is_refreshed_before_reads() {
     assert_eq!(tokens["withings"]["access_token"], "wa-new");
     assert_eq!(tokens["withings"]["refresh_token"], "wa-refresh-2");
     let expires = tokens["withings"]["expires_at"].as_u64().unwrap();
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs();
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
     assert!(expires > now + 10000, "expiry {expires} not in the future");
 }
 
@@ -138,11 +135,7 @@ fn rejected_withings_refresh_exits_4_and_names_the_withings_auth_command() {
     let run = run_sync(&dir, &[], &sync_env(&withings, &garmin, &diauth));
 
     assert_eq!(run.code, 4, "stdout: {}", run.stdout);
-    assert!(
-        run.stderr.contains("re-run `auth withings`"),
-        "stderr: {}",
-        run.stderr
-    );
+    assert!(run.stderr.contains("re-run `auth withings`"), "stderr: {}", run.stderr);
 }
 
 // ---------------------------------------------------------------------------
@@ -190,10 +183,7 @@ fn withings_401_mid_read_refreshes_token_and_retries_once() {
     assert_eq!(form_value(&fields, "client_id"), "test-client-id");
     assert_eq!(form_value(&fields, "client_secret"), "test-client-secret");
     assert_eq!(requests[2].path, "/measure");
-    assert_eq!(
-        requests[2].header("authorization").unwrap(),
-        "Bearer wa-new"
-    );
+    assert_eq!(requests[2].header("authorization").unwrap(), "Bearer wa-new");
 
     // The retry restarts the paginated read from page 0.
     let reads = withings.requests_for("POST", "/measure");
@@ -206,10 +196,7 @@ fn withings_401_mid_read_refreshes_token_and_retries_once() {
     assert_eq!(tokens["withings"]["access_token"], "wa-new");
     assert_eq!(tokens["withings"]["refresh_token"], "wa-refresh-2");
     let expires = tokens["withings"]["expires_at"].as_u64().unwrap();
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs();
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
     assert!(expires > now + 10000, "expiry {expires} not in the future");
 }
 
@@ -220,11 +207,7 @@ fn withings_403_mid_read_refreshes_token_and_retries_once() {
     write_tokens(&dir, "wa-stale", now_epoch_plus(3600), "ga");
     let withings = FakeServer::start(vec![
         Route::post("/measure", |_req, call| {
-            if call == 0 {
-                FakeResponse::new(403, "forbidden")
-            } else {
-                empty_measures()
-            }
+            if call == 0 { FakeResponse::new(403, "forbidden") } else { empty_measures() }
         }),
         Route::post("/v2/oauth2", |_req, _i| {
             FakeResponse::json(
@@ -250,11 +233,7 @@ fn withings_body_status_401_triggers_refresh_and_retry() {
     write_tokens(&dir, "wa-stale", now_epoch_plus(3600), "ga");
     let withings = FakeServer::start(vec![
         Route::post("/measure", |_req, call| {
-            if call == 0 {
-                FakeResponse::json(200, r#"{"status":401}"#)
-            } else {
-                empty_measures()
-            }
+            if call == 0 { FakeResponse::json(200, r#"{"status":401}"#) } else { empty_measures() }
         }),
         Route::post("/v2/oauth2", |_req, _i| {
             FakeResponse::json(
@@ -279,12 +258,8 @@ fn rejected_withings_mid_read_refresh_exits_4_without_retry() {
     write_file(&dir.path().join("config.toml"), CONFIG);
     write_tokens(&dir, "wa-stale", now_epoch_plus(3600), "ga");
     let withings = FakeServer::start(vec![
-        Route::post("/measure", |_req, _i| {
-            FakeResponse::new(401, "unauthorized")
-        }),
-        Route::post("/v2/oauth2", |_req, _i| {
-            FakeResponse::json(200, r#"{"status": 2557}"#)
-        }),
+        Route::post("/measure", |_req, _i| FakeResponse::new(401, "unauthorized")),
+        Route::post("/v2/oauth2", |_req, _i| FakeResponse::json(200, r#"{"status": 2557}"#)),
     ]);
     let garmin = FakeServer::start(vec![]);
     let diauth = FakeServer::start(vec![]);
@@ -292,11 +267,7 @@ fn rejected_withings_mid_read_refresh_exits_4_without_retry() {
     let run = run_sync(&dir, &[], &sync_env(&withings, &garmin, &diauth));
 
     assert_eq!(run.code, 4, "stdout: {}", run.stdout);
-    assert!(
-        run.stderr.contains("re-run `auth withings`"),
-        "stderr: {}",
-        run.stderr
-    );
+    assert!(run.stderr.contains("re-run `auth withings`"), "stderr: {}", run.stderr);
     // No retry read after the failed refresh.
     assert_eq!(withings.requests_for("POST", "/measure").len(), 1);
 }
@@ -307,9 +278,7 @@ fn withings_fresh_token_still_rejected_exits_4() {
     write_file(&dir.path().join("config.toml"), CONFIG);
     write_tokens(&dir, "wa-stale", now_epoch_plus(3600), "ga");
     let withings = FakeServer::start(vec![
-        Route::post("/measure", |_req, _i| {
-            FakeResponse::new(401, "unauthorized")
-        }),
+        Route::post("/measure", |_req, _i| FakeResponse::new(401, "unauthorized")),
         Route::post("/v2/oauth2", |_req, _i| {
             FakeResponse::json(
                 200,
@@ -323,16 +292,8 @@ fn withings_fresh_token_still_rejected_exits_4() {
     let run = run_sync(&dir, &[], &sync_env(&withings, &garmin, &diauth));
 
     assert_eq!(run.code, 4, "stdout: {}", run.stdout);
-    assert!(
-        run.stderr.contains("still rejected"),
-        "stderr: {}",
-        run.stderr
-    );
-    assert!(
-        run.stderr.contains("re-run `auth withings`"),
-        "stderr: {}",
-        run.stderr
-    );
+    assert!(run.stderr.contains("still rejected"), "stderr: {}", run.stderr);
+    assert!(run.stderr.contains("re-run `auth withings`"), "stderr: {}", run.stderr);
     // Exactly one refresh and one retry; no further attempts.
     assert_eq!(withings.requests_for("POST", "/measure").len(), 2);
     assert_eq!(withings.requests_for("POST", "/v2/oauth2").len(), 1);
@@ -348,9 +309,8 @@ fn garmin_401_write_refreshes_token_and_retries_once() {
     write_file(&dir.path().join("config.toml"), CONFIG);
     write_tokens(&dir, "wa", now_epoch_plus(3600), "ga-stale");
     let withings = FakeServer::start(vec![Route::post("/measure", |_req, _i| measure_page())]);
-    let garmin = FakeServer::start(vec![Route::post(
-        "/weight-service/user-weight",
-        |req, call| {
+    let garmin =
+        FakeServer::start(vec![Route::post("/weight-service/user-weight", |req, call| {
             if call == 0 {
                 assert_eq!(req.header("authorization").unwrap(), "Bearer ga-stale");
                 FakeResponse::new(401, "unauthorized")
@@ -358,17 +318,11 @@ fn garmin_401_write_refreshes_token_and_retries_once() {
                 assert_eq!(req.header("authorization").unwrap(), "Bearer ga-new");
                 FakeResponse::new(204, "")
             }
-        },
-    )]);
-    let diauth = FakeServer::start(vec![Route::post(
-        "/di-oauth2-service/oauth/token",
-        |_req, _i| {
-            FakeResponse::json(
-                200,
-                r#"{"access_token":"ga-new","refresh_token":"ga-refresh-2"}"#,
-            )
-        },
-    )]);
+        })]);
+    let diauth =
+        FakeServer::start(vec![Route::post("/di-oauth2-service/oauth/token", |_req, _i| {
+            FakeResponse::json(200, r#"{"access_token":"ga-new","refresh_token":"ga-refresh-2"}"#)
+        })]);
 
     let run = run_sync(&dir, &["--apply"], &sync_env(&withings, &garmin, &diauth));
 
@@ -397,30 +351,20 @@ fn rejected_garmin_refresh_aborts_with_exit_4() {
     write_file(&dir.path().join("config.toml"), CONFIG);
     write_tokens(&dir, "wa", now_epoch_plus(3600), "ga-stale");
     let withings = FakeServer::start(vec![Route::post("/measure", |_req, _i| measure_page())]);
-    let garmin = FakeServer::start(vec![Route::post(
-        "/weight-service/user-weight",
-        |_req, _i| FakeResponse::new(401, "unauthorized"),
-    )]);
-    let diauth = FakeServer::start(vec![Route::post(
-        "/di-oauth2-service/oauth/token",
-        |_req, _i| FakeResponse::new(401, r#"{"error":"invalid_grant"}"#),
-    )]);
+    let garmin = FakeServer::start(vec![Route::post("/weight-service/user-weight", |_req, _i| {
+        FakeResponse::new(401, "unauthorized")
+    })]);
+    let diauth =
+        FakeServer::start(vec![Route::post("/di-oauth2-service/oauth/token", |_req, _i| {
+            FakeResponse::new(401, r#"{"error":"invalid_grant"}"#)
+        })]);
 
     let run = run_sync(&dir, &["--apply"], &sync_env(&withings, &garmin, &diauth));
 
     assert_eq!(run.code, 4, "stdout: {}", run.stdout);
-    assert!(
-        run.stderr.contains("re-run `auth garmin`"),
-        "stderr: {}",
-        run.stderr
-    );
+    assert!(run.stderr.contains("re-run `auth garmin`"), "stderr: {}", run.stderr);
     // No second write attempt after the failed refresh.
-    assert_eq!(
-        garmin
-            .requests_for("POST", "/weight-service/user-weight")
-            .len(),
-        1
-    );
+    assert_eq!(garmin.requests_for("POST", "/weight-service/user-weight").len(), 1);
 }
 
 // ---------------------------------------------------------------------------
@@ -433,11 +377,7 @@ fn withings_601_is_retried_with_backoff() {
     write_file(&dir.path().join("config.toml"), CONFIG);
     write_tokens(&dir, "wa", now_epoch_plus(3600), "ga");
     let withings = FakeServer::start(vec![Route::post("/measure", |_req, call| {
-        if call == 0 {
-            FakeResponse::new(601, "rate limited")
-        } else {
-            empty_measures()
-        }
+        if call == 0 { FakeResponse::new(601, "rate limited") } else { empty_measures() }
     })]);
     let garmin = FakeServer::start(vec![]);
     let diauth = FakeServer::start(vec![]);
@@ -465,11 +405,7 @@ fn garmin_429_is_retried_whether_http_status_or_json_body() {
     // Weight: HTTP 429 then success. BP: 200 body with JSON 429 then success.
     let garmin = FakeServer::start(vec![
         Route::post("/weight-service/user-weight", |_req, call| {
-            if call == 0 {
-                FakeResponse::new(429, "slow down")
-            } else {
-                FakeResponse::new(204, "")
-            }
+            if call == 0 { FakeResponse::new(429, "slow down") } else { FakeResponse::new(204, "") }
         }),
         Route::post("/bloodpressure-service/bloodpressure", |_req, call| {
             if call == 0 {
@@ -484,27 +420,15 @@ fn garmin_429_is_retried_whether_http_status_or_json_body() {
     let run = run_sync(&dir, &["--apply"], &sync_env(&withings, &garmin, &diauth));
 
     assert_eq!(run.code, 0, "stderr: {}", run.stderr);
-    assert_eq!(
-        garmin
-            .requests_for("POST", "/weight-service/user-weight")
-            .len(),
-        2
-    );
-    assert_eq!(
-        garmin
-            .requests_for("POST", "/bloodpressure-service/bloodpressure")
-            .len(),
-        2
-    );
+    assert_eq!(garmin.requests_for("POST", "/weight-service/user-weight").len(), 2);
+    assert_eq!(garmin.requests_for("POST", "/bloodpressure-service/bloodpressure").len(), 2);
     assert!(
-        run.stdout
-            .contains("weight: 1 written, 0 skipped, 0 failed"),
+        run.stdout.contains("weight: 1 written, 0 skipped, 0 failed"),
         "stdout: {}",
         run.stdout
     );
     assert!(
-        run.stdout
-            .contains("blood-pressure: 1 written, 0 skipped, 0 failed"),
+        run.stdout.contains("blood-pressure: 1 written, 0 skipped, 0 failed"),
         "stdout: {}",
         run.stdout
     );
@@ -520,27 +444,17 @@ fn garmin_412_surfaces_the_upload_consent_message() {
     write_file(&dir.path().join("config.toml"), CONFIG);
     write_tokens(&dir, "wa", now_epoch_plus(3600), "ga");
     let withings = FakeServer::start(vec![Route::post("/measure", |_req, _i| measure_page())]);
-    let garmin = FakeServer::start(vec![Route::post(
-        "/weight-service/user-weight",
-        |_req, _i| FakeResponse::new(412, r#"{"error":"consent required"}"#),
-    )]);
+    let garmin = FakeServer::start(vec![Route::post("/weight-service/user-weight", |_req, _i| {
+        FakeResponse::new(412, r#"{"error":"consent required"}"#)
+    })]);
     let diauth = FakeServer::start(vec![]);
 
     let run = run_sync(&dir, &["--apply"], &sync_env(&withings, &garmin, &diauth));
 
     assert_eq!(run.code, 1, "stdout: {}", run.stdout);
-    assert!(
-        run.stderr.contains("upload consent"),
-        "stderr: {}",
-        run.stderr
-    );
+    assert!(run.stderr.contains("upload consent"), "stderr: {}", run.stderr);
     // 412 is not retried.
-    assert_eq!(
-        garmin
-            .requests_for("POST", "/weight-service/user-weight")
-            .len(),
-        1
-    );
+    assert_eq!(garmin.requests_for("POST", "/weight-service/user-weight").len(), 1);
 }
 
 // ---------------------------------------------------------------------------
@@ -559,11 +473,7 @@ fn verbose_logs_each_request_and_response() {
     let run = run_sync(&dir, &["--verbose"], &sync_env(&withings, &garmin, &diauth));
 
     assert_eq!(run.code, 0, "stderr: {}", run.stderr);
-    assert!(
-        run.stderr.contains("[verbose] -> POST"),
-        "stderr: {}",
-        run.stderr
-    );
+    assert!(run.stderr.contains("[verbose] -> POST"), "stderr: {}", run.stderr);
     assert!(run.stderr.contains("/measure"), "stderr: {}", run.stderr);
     assert!(run.stderr.contains("<- HTTP 200"), "stderr: {}", run.stderr);
 }
@@ -572,39 +482,25 @@ fn verbose_logs_each_request_and_response() {
 fn verbose_sync_redacts_tokens_from_headers_and_response_body() {
     let dir = TempDir::new();
     write_file(&dir.path().join("config.toml"), CONFIG);
-    write_tokens(
-        &dir,
-        "wa-secret-token",
-        now_epoch_plus(3600),
-        "ga-secret-token",
-    );
+    write_tokens(&dir, "wa-secret-token", now_epoch_plus(3600), "ga-secret-token");
     let withings = FakeServer::start(vec![Route::post("/measure", |_req, _i| {
         FakeResponse::json(
             200,
             r#"{"status":0,"access_token":"response-secret","body":{"updatetime":1767342600,"timezone":"UTC","measuregrps":[{"grpid":1,"attrib":2,"date":1767342600,"category":1,"measures":[{"value":82400,"type":1,"unit":-3}]}],"more":0,"offset":0}}"#,
         )
     })]);
-    let garmin = FakeServer::start(vec![Route::post(
-        "/weight-service/user-weight",
-        |_req, _i| FakeResponse::new(204, ""),
-    )]);
+    let garmin = FakeServer::start(vec![Route::post("/weight-service/user-weight", |_req, _i| {
+        FakeResponse::new(204, "")
+    })]);
     let diauth = FakeServer::start(vec![]);
 
     let run = run_sync(&dir, &["--verbose"], &sync_env(&withings, &garmin, &diauth));
 
     assert_eq!(run.code, 0, "stderr: {}", run.stderr);
     for secret in ["wa-secret-token", "ga-secret-token", "response-secret"] {
-        assert!(
-            !run.stderr.contains(secret),
-            "leaked {secret}: {}",
-            run.stderr
-        );
+        assert!(!run.stderr.contains(secret), "leaked {secret}: {}", run.stderr);
     }
-    assert!(
-        run.stderr.contains("Authorization: [REDACTED]"),
-        "{}",
-        run.stderr
-    );
+    assert!(run.stderr.contains("Authorization: [REDACTED]"), "{}", run.stderr);
     assert!(run.stderr.contains("[REDACTED]"), "{}", run.stderr);
 }
 
@@ -614,10 +510,9 @@ fn non_verbose_sync_error_redacts_token_in_response_body() {
     write_file(&dir.path().join("config.toml"), CONFIG);
     write_tokens(&dir, "wa", now_epoch_plus(3600), "ga");
     let withings = FakeServer::start(vec![Route::post("/measure", |_req, _i| measure_page())]);
-    let garmin = FakeServer::start(vec![Route::post(
-        "/weight-service/user-weight",
-        |_req, _i| FakeResponse::json(400, r#"{"access_token":"error-secret"}"#),
-    )]);
+    let garmin = FakeServer::start(vec![Route::post("/weight-service/user-weight", |_req, _i| {
+        FakeResponse::json(400, r#"{"access_token":"error-secret"}"#)
+    })]);
     let diauth = FakeServer::start(vec![]);
 
     let run = run_sync(&dir, &["--apply"], &sync_env(&withings, &garmin, &diauth));
@@ -643,25 +538,19 @@ fn persistent_json_429_is_failure_not_success() {
             ],"more":0,"offset":0}}"#,
         )
     })]);
-    let garmin = FakeServer::start(vec![Route::post(
-        "/bloodpressure-service/bloodpressure",
-        |_req, _i| FakeResponse::json(200, r#"{"error":{"status-code":"429"}}"#),
-    )]);
+    let garmin =
+        FakeServer::start(vec![Route::post("/bloodpressure-service/bloodpressure", |_req, _i| {
+            FakeResponse::json(200, r#"{"error":{"status-code":"429"}}"#)
+        })]);
     let diauth = FakeServer::start(vec![]);
 
     let run = run_sync(&dir, &["--apply"], &sync_env(&withings, &garmin, &diauth));
 
     // Three attempts (backoff), then a counted failure: exit 1, not 0.
     assert_eq!(run.code, 1, "stdout: {}", run.stdout);
-    assert_eq!(
-        garmin
-            .requests_for("POST", "/bloodpressure-service/bloodpressure")
-            .len(),
-        3
-    );
+    assert_eq!(garmin.requests_for("POST", "/bloodpressure-service/bloodpressure").len(), 3);
     assert!(
-        run.stdout
-            .contains("blood-pressure: 0 written, 0 skipped, 1 failed"),
+        run.stdout.contains("blood-pressure: 0 written, 0 skipped, 1 failed"),
         "stdout: {}",
         run.stdout
     );
@@ -679,11 +568,7 @@ fn empty_tokens_file_exits_3_with_run_auth_hint() {
     let run = run_sync(&dir, &[], &sync_env(&withings, &garmin, &diauth));
 
     assert_eq!(run.code, 3, "stdout: {}", run.stdout);
-    assert!(
-        run.stderr.contains("run `auth` first"),
-        "stderr: {}",
-        run.stderr
-    );
+    assert!(run.stderr.contains("run `auth` first"), "stderr: {}", run.stderr);
 }
 
 #[test]
@@ -698,11 +583,7 @@ fn until_alone_means_beginning_despite_floors() {
     let garmin = FakeServer::start(vec![]);
     let diauth = FakeServer::start(vec![]);
 
-    let run = run_sync(
-        &dir,
-        &["--until", "2026-02-01"],
-        &sync_env(&withings, &garmin, &diauth),
-    );
+    let run = run_sync(&dir, &["--until", "2026-02-01"], &sync_env(&withings, &garmin, &diauth));
 
     assert_eq!(run.code, 0, "stderr: {}", run.stderr);
     let reads = withings.requests_for("POST", "/measure");
@@ -713,9 +594,5 @@ fn until_alone_means_beginning_despite_floors() {
 }
 
 fn now_epoch_plus(seconds: u64) -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs()
-        + seconds
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() + seconds
 }
