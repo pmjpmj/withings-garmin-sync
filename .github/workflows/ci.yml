@@ -10,6 +10,8 @@ permissions:
 jobs:
   ci:
     runs-on: ubuntu-latest
+    # Configure this environment in repository settings with maintainer reviewers.
+    environment: maintainer-approval
     steps:
       - uses: actions/checkout@v4
 
