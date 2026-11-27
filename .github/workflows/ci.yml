@@ -13,7 +13,7 @@ jobs:
     # Configure this environment in repository settings with maintainer reviewers.
     environment: maintainer-approval
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: actions-rust-lang/setup-rust-toolchain@v2
         with:
