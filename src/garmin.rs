@@ -66,24 +66,21 @@ fn sso_headers() -> [(&'static str, &'static str); 3] {
 }
 
 fn sign_in_url(sso_base: &str) -> String {
-    format!(
-        "{sso_base}{SSO_SIGN_IN_PATH}?clientId={}&service={}",
-        query_encode(MOBILE_SSO_CLIENT_ID),
-        query_encode(MOBILE_SSO_SERVICE_URL),
-    )
+    sso_url(sso_base, SSO_SIGN_IN_PATH, false)
 }
 
 fn login_url(sso_base: &str) -> String {
-    format!(
-        "{sso_base}{SSO_LOGIN_PATH}?clientId={}&locale=en-US&service={}",
-        query_encode(MOBILE_SSO_CLIENT_ID),
-        query_encode(MOBILE_SSO_SERVICE_URL),
-    )
+    sso_url(sso_base, SSO_LOGIN_PATH, true)
 }
 
 fn mfa_url(sso_base: &str) -> String {
+    sso_url(sso_base, SSO_MFA_PATH, true)
+}
+
+fn sso_url(sso_base: &str, path: &str, include_locale: bool) -> String {
+    let locale = if include_locale { "&locale=en-US" } else { "" };
     format!(
-        "{sso_base}{SSO_MFA_PATH}?clientId={}&locale=en-US&service={}",
+        "{sso_base}{path}?clientId={}{locale}&service={}",
         query_encode(MOBILE_SSO_CLIENT_ID),
         query_encode(MOBILE_SSO_SERVICE_URL),
     )
