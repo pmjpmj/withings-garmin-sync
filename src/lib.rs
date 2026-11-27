@@ -215,10 +215,7 @@ fn run_auth_withings(client: &http::HttpClient, dir: &Path) -> Result<(), AppErr
 
     // Read-modify-write: replace only the withings section of the shared
     // token file; the garmin section (if any) is left as loaded.
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
+    let now = timefmt::now_epoch() as u64;
     update_tokens_section(dir, |tokens| {
         tokens.withings = config::WithingsTokens {
             access_token: withings_tokens.access_token,

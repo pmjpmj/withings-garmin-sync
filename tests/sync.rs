@@ -6,7 +6,8 @@
 mod common;
 
 use common::{
-    FakeResponse, FakeServer, Route, TempDir, form_value, parse_form, run_bin,
+    FakeResponse, FakeServer, Route, TempDir, bp_group, form_value, measures_page,
+    now_epoch as now, ok_garmin, parse_form, run_bin, run_sync, single_page_withings, weight_group,
     write_valid_config_and_tokens,
 };
 use serde_json::json;
@@ -17,96 +18,6 @@ const EPOCH: i64 = 1767342600;
 const JAN1: i64 = 1767225600;
 /// 2026-02-01T00:00:00Z.
 const FEB1: i64 = 1769904000;
-
-fn now() -> i64 {
-    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64
-}
-
-/// A Withings `getmeas` response page.
-fn measures_page(groups: serde_json::Value, more: u8, offset: u32) -> String {
-    json!({
-        "status": 0,
-        "body": {
-            "updatetime": EPOCH,
-            "timezone": "UTC",
-            "measuregrps": groups,
-            "more": more,
-            "offset": offset
-        }
-    })
-    .to_string()
-}
-
-fn weight_group(value: i64, unit: i16, date: i64) -> serde_json::Value {
-    json!({
-        "grpid": 1,
-        "attrib": 2,
-        "date": date,
-        "category": 1,
-        "measures": [{"value": value, "type": 1, "unit": unit}]
-    })
-}
-
-fn bp_group(systolic: i64, diastolic: i64, pulse: Option<i64>, date: i64) -> serde_json::Value {
-    let mut measures = vec![
-        json!({"value": systolic, "type": 10, "unit": 0}),
-        json!({"value": diastolic, "type": 9, "unit": 0}),
-    ];
-    if let Some(pulse) = pulse {
-        measures.push(json!({"value": pulse, "type": 11, "unit": 0}));
-    }
-    json!({"grpid": 2, "attrib": 2, "date": date, "category": 1, "measures": measures})
-}
-
-fn single_page_withings(groups: Vec<serde_json::Value>) -> FakeServer {
-    let groups = serde_json::Value::Array(groups);
-    FakeServer::start(vec![Route::post("/measure", move |_req, _i| {
-        FakeResponse::json(200, &measures_page(groups.clone(), 0, 0))
-    })])
-}
-
-/// Garmin API fake that accepts weight (204) and BP (200) writes. The BP
-/// range read-back route is deliberately absent (ADR-0008 deleted it); a
-/// run that still calls it would get a 404 and the tests fail on the
-/// missing writes.
-fn ok_garmin() -> FakeServer {
-    FakeServer::start(vec![
-        Route::post("/weight-service/user-weight", |_req, _i| FakeResponse::new(204, "")),
-        Route::post("/bloodpressure-service/bloodpressure", |_req, _i| {
-            FakeResponse::json(200, "{}")
-        }),
-    ])
-}
-
-fn sync_env<'a>(withings: &'a FakeServer, garmin: &'a FakeServer) -> Vec<(&'static str, &'a str)> {
-    vec![
-        ("WGS_WITHINGS_API_BASE", withings.base_url.as_str()),
-        ("WGS_GARMIN_API_BASE", garmin.base_url.as_str()),
-        ("TZ", "UTC"),
-    ]
-}
-
-fn run_sync(
-    dir: &TempDir,
-    args: &[&str],
-    withings: &FakeServer,
-    garmin: &FakeServer,
-) -> common::Run {
-    let mut full: Vec<&str> = vec!["sync"];
-    // A metric subcommand must come directly after `sync`; the flags follow
-    // it (parent flags conflict with subcommands).
-    let rest: &[&str] = match args.first() {
-        Some(&"weight" | &"bp" | &"all") => {
-            full.push(args[0]);
-            &args[1..]
-        }
-        _ => args,
-    };
-    full.push("--config-dir");
-    full.push(dir.path().to_str().unwrap());
-    full.extend_from_slice(rest);
-    run_bin(&full, &sync_env(withings, garmin))
-}
 
 // ---------------------------------------------------------------------------
 // dry-run

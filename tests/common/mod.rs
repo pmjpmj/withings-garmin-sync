@@ -127,6 +127,90 @@ pub fn write_valid_config_and_tokens(dir: &Path) {
     write_file(&dir.join("tokens.json"), VALID_TOKENS);
 }
 
+/// Current Unix timestamp in seconds for time-bounded integration assertions.
+pub fn now_epoch() -> i64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64
+}
+
+/// Build a Withings `getmeas` response page.
+pub fn measures_page(groups: serde_json::Value, more: u8, offset: u32) -> String {
+    serde_json::json!({
+        "status": 0,
+        "body": {
+            "updatetime": 1767342600_i64,
+            "timezone": "UTC",
+            "measuregrps": groups,
+            "more": more,
+            "offset": offset
+        }
+    })
+    .to_string()
+}
+
+pub fn weight_group(value: i64, unit: i16, date: i64) -> serde_json::Value {
+    serde_json::json!({
+        "grpid": 1,
+        "attrib": 2,
+        "date": date,
+        "category": 1,
+        "measures": [{"value": value, "type": 1, "unit": unit}]
+    })
+}
+
+pub fn bp_group(systolic: i64, diastolic: i64, pulse: Option<i64>, date: i64) -> serde_json::Value {
+    let mut measures = vec![
+        serde_json::json!({"value": systolic, "type": 10, "unit": 0}),
+        serde_json::json!({"value": diastolic, "type": 9, "unit": 0}),
+    ];
+    if let Some(pulse) = pulse {
+        measures.push(serde_json::json!({"value": pulse, "type": 11, "unit": 0}));
+    }
+    serde_json::json!({"grpid": 2, "attrib": 2, "date": date, "category": 1, "measures": measures})
+}
+
+pub fn single_page_withings(groups: Vec<serde_json::Value>) -> FakeServer {
+    let groups = serde_json::Value::Array(groups);
+    FakeServer::start(vec![Route::post("/measure", move |_req, _i| {
+        FakeResponse::json(200, &measures_page(groups.clone(), 0, 0))
+    })])
+}
+
+/// Garmin API fake that accepts weight and BP writes; read-back routes stay absent.
+pub fn ok_garmin() -> FakeServer {
+    FakeServer::start(vec![
+        Route::post("/weight-service/user-weight", |_req, _i| FakeResponse::new(204, "")),
+        Route::post("/bloodpressure-service/bloodpressure", |_req, _i| {
+            FakeResponse::json(200, "{}")
+        }),
+    ])
+}
+
+pub fn sync_env<'a>(
+    withings: &'a FakeServer,
+    garmin: &'a FakeServer,
+) -> Vec<(&'static str, &'a str)> {
+    vec![
+        ("WGS_WITHINGS_API_BASE", withings.base_url.as_str()),
+        ("WGS_GARMIN_API_BASE", garmin.base_url.as_str()),
+        ("TZ", "UTC"),
+    ]
+}
+
+pub fn run_sync(dir: &TempDir, args: &[&str], withings: &FakeServer, garmin: &FakeServer) -> Run {
+    let mut full: Vec<&str> = vec!["sync"];
+    let rest: &[&str] = match args.first() {
+        Some(&"weight" | &"bp" | &"all") => {
+            full.push(args[0]);
+            &args[1..]
+        }
+        _ => args,
+    };
+    full.push("--config-dir");
+    full.push(dir.path().to_str().unwrap());
+    full.extend_from_slice(rest);
+    run_bin(&full, &sync_env(withings, garmin))
+}
+
 /// Parse an `application/x-www-form-urlencoded` body into `(key, value)` pairs,
 /// URL-decoding each component.
 pub fn parse_form(body: &str) -> Vec<(String, String)> {
