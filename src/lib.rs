@@ -351,9 +351,20 @@ fn run_sync(cli_args: SyncArgs) -> Result<i32, AppError> {
     // Parse first so valid ntfy settings can report later config validation
     // errors. A malformed file cannot be trusted to provide notifier settings.
     let config_path = config::config_path(&dir);
-    let parsed_config = config::read_config_file(&config_path)?.ok_or_else(|| {
-        AppError::config(format!("config not found at {}; run `auth` first", config_path.display()))
-    })?;
+    let parsed_config = config::read_config_file(&config_path)
+        .map_err(|error| {
+            if error.message.starts_with("invalid config at ") {
+                AppError::config(format!("{}; run `auth` first", error.message))
+            } else {
+                error
+            }
+        })?
+        .ok_or_else(|| {
+            AppError::config(format!(
+                "config not found at {}; run `auth` first",
+                config_path.display()
+            ))
+        })?;
     let notifier = if args.use_ntfy {
         Some(
             parsed_config
