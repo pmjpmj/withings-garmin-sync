@@ -280,12 +280,15 @@ written.
 
 ### Releasing
 
-Push a tag `vX.Y.Z` that matches the `version` in `Cargo.toml` (bump it on
-`main` first). `.github/workflows/release.yml` runs the test suite, builds
-Linux (x86_64 glibc, arm64 static musl) and macOS (arm64) binaries
-natively, and
-attaches the tarballs plus `SHA256SUMS` to the GitHub Release. See ADR-0002,
-ADR-0003, and ADR-0004.
+The release-plz workflow opens or updates a release PR on `main`. It derives
+the next version and `CHANGELOG.md` entry from Conventional Commit messages.
+Review and merge that PR to create a `vX.Y.Z` tag. The tag triggers
+`.github/workflows/release.yml`, which runs the test suite, builds Linux
+(x86_64 glibc, arm64 static musl) and macOS (arm64) binaries, and attaches the
+tarballs plus `SHA256SUMS` to the GitHub Release. Configure the repository
+secret `RELEASE_PLZ_TOKEN` with a token that can write contents and pull
+requests; using this token lets the created tag trigger the release workflow.
+See ADR-0002, ADR-0003, ADR-0004, and ADR-0011.
 
 ## License
 

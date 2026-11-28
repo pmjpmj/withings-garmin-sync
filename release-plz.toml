@@ -1,0 +1,6 @@
+[workspace]
+git_only = true
+git_tag_name = "v{{ version }}"
+git_release_enable = false
+changelog_path = "CHANGELOG.md"
+features_always_increment_minor = false
