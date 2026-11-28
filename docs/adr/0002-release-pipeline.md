@@ -9,6 +9,10 @@ The CLI is distributed by source (`cargo install --path .`), which requires
 every user to own a Rust toolchain. There was no CI at all. The plan was to
 publish versioned binaries for Linux and macOS on GitHub.
 
+The manual version and tag steps described in this ADR were replaced by
+ADR-0011. The binary build, test, and packaging decisions below remain in
+effect.
+
 ## Decision
 
 A release pipeline is triggered by pushing a version tag (`vX.Y.Z`) to GitHub
@@ -25,9 +29,9 @@ A release pipeline is triggered by pushing a version tag (`vX.Y.Z`) to GitHub
   download is documented (`xattr -d com.apple.quarantine`); real signing
   needs a paid Apple Developer account and buys nothing for one user.
 - **Tag/manifest contract:** the tag must match the `Cargo.toml` version. The
-  workflow hard-fails on mismatch; it never edits the manifest. Version bumps
-  happen on `main` as a normal commit *before* tagging, so tags stay
-  immutable and source installs match releases.
+  workflow hard-fails on mismatch; it never edits the manifest. release-plz
+  prepares version bumps in a reviewed PR and creates the matching tag after
+  merge (ADR-0011).
 - **Release assets, not workflow artifacts.** Artifacts expire after 90 days
   and aren't versioned. Build jobs hand tarballs to the release job via
   workflow artifacts (legitimate CI-to-CI handoff), and the release job
@@ -40,8 +44,8 @@ A release pipeline is triggered by pushing a version tag (`vX.Y.Z`) to GitHub
 
 ## Consequences
 
-- Releasing is: bump `version` in `Cargo.toml`, commit, `git tag vX.Y.Z`,
-  `git push --tags`. Anything else fails the run.
+- The tag remains the release workflow trigger and must match the package
+  version. ADR-0011 defines how the version and tag are prepared.
 - GitHub Releases become the canonical way to install without a toolchain.
 - If a Linux user reports a missing `libssl.so.3`, revisit: either rustls
   (self-contained binaries) or musl with vendored OpenSSL.
