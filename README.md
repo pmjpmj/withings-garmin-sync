@@ -130,7 +130,7 @@ Files are written under `~/.config/withings-garmin-sync/` (override with
 
 | File | Contents | Permissions |
 |---|---|---|
-| `config.toml` | Static settings: Withings OAuth client id/secret, per-metric sync floors (machine-updated) | `0600` |
+| `config.toml` | Withings OAuth credentials, per-metric sync floors, optional ntfy settings | `0600` |
 | `tokens.json` | Secrets: Withings + Garmin access/refresh tokens | `0600` |
 
 Example `config.toml`:
@@ -147,7 +147,20 @@ since = "2026-01-02T08:30:00Z"   # everything at or before this is handled
 
 [sync.bp]
 since = "2026-01-02T08:30:00Z"
+
+# Optional failure notifications (only sent with `sync --use-ntfy`).
+[ntfy]
+topic = "replace-with-a-long-private-topic-name"
+# server = "https://ntfy.sh"  # default; change for a self-hosted ntfy server
+# token = "tk_..."            # optional bearer token for a protected topic
 ```
+
+Add `--use-ntfy` to a sync command to receive a notification for any failed
+run, including dry runs. The alert reports a failure category or metric write
+counts without including measurement values or credentials. If notification
+delivery fails, the command warns on stderr and preserves the sync's exit code.
+Use a long, hard-to-guess topic on the public ntfy server, or configure a
+protected topic and token.
 
 Each floor marks the Withings query timestamp of that metric's last clean
 flag-free apply (ADR-0010): everything at or before it is handled — written
@@ -177,6 +190,9 @@ withings-garmin-sync sync
 
 # Actually write to Garmin Connect.
 withings-garmin-sync sync --apply
+
+# Send an ntfy notification if this run fails (requires [ntfy] config above).
+withings-garmin-sync sync --apply --use-ntfy
 
 # Restrict a run to one metric (the other is untouched):
 withings-garmin-sync sync weight --apply   # weight only
@@ -241,11 +257,11 @@ exceptions; see the backfill caveat above).
 
 ```cron
 # Weight every 2 hours.
-0 */2 * * * /home/you/.cargo/bin/withings-garmin-sync sync weight --apply >> /home/you/.local/log/wgs-weight.log 2>&1
+0 */2 * * * /home/you/.cargo/bin/withings-garmin-sync sync weight --apply --use-ntfy >> /home/you/.local/log/wgs-weight.log 2>&1
 
 # Blood pressure every 2 hours: afternoon and evening readings land the
 # same day, and multiple same-day readings are all preserved.
-30 */2 * * * /home/you/.cargo/bin/withings-garmin-sync sync bp --apply >> /home/you/.local/log/wgs-bp.log 2>&1
+30 */2 * * * /home/you/.cargo/bin/withings-garmin-sync sync bp --apply --use-ntfy >> /home/you/.local/log/wgs-bp.log 2>&1
 ```
 
 Do not force an older window on a schedule (see the backfill caveat above):

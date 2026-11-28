@@ -3,6 +3,7 @@ pub mod config;
 pub mod garmin;
 pub mod http;
 pub mod metric;
+pub mod ntfy;
 pub mod session;
 pub mod timefmt;
 pub mod transform;
@@ -345,14 +346,85 @@ fn run_sync(cli_args: SyncArgs) -> Result<i32, AppError> {
         Some(metric) => metric.into_parts(),
         None => (cli_args.options, MetricScope::All),
     };
+    let dir = config::resolve_config_dir(args.config_dir.as_deref())?;
+
+    // Parse first so valid ntfy settings can report later config validation
+    // errors. A malformed file cannot be trusted to provide notifier settings.
+    let config_path = config::config_path(&dir);
+    let parsed_config = config::read_config_file(&config_path)?.ok_or_else(|| {
+        AppError::config(format!("config not found at {}; run `auth` first", config_path.display()))
+    })?;
+    let notifier = if args.use_ntfy {
+        Some(
+            parsed_config
+                .ntfy
+                .as_ref()
+                .filter(|settings| !settings.topic.trim().is_empty())
+                .ok_or_else(|| {
+                    AppError::config(
+                        "--use-ntfy requires [ntfy] with a non-empty topic in config.toml",
+                    )
+                })?
+                .clone(),
+        )
+    } else {
+        None
+    };
+    let mut config = match config::validate_config(parsed_config, &config_path) {
+        Ok(config) => config,
+        Err(error) => {
+            if let Some(notifier) = &notifier {
+                notify_failure(notifier, failure_category(error.code));
+            }
+            return Err(error);
+        }
+    };
+    let result = run_sync_loaded(args, scope, dir, &mut config);
+    if let Some(notifier) = notifier {
+        let detail = match &result {
+            Ok(outcome) if outcome.code != EXIT_OK => {
+                outcome.failure_detail.as_deref().unwrap_or("sync failed")
+            }
+            Err(error) => failure_category(error.code),
+            _ => "",
+        };
+        if !detail.is_empty() {
+            notify_failure(&notifier, detail);
+        }
+    }
+    result.map(|outcome| outcome.code)
+}
+
+fn notify_failure(config: &config::NtfyConfig, detail: &str) {
+    if let Err(error) = ntfy::notify(config, detail) {
+        eprintln!("warning: could not send ntfy notification: {error}");
+    }
+}
+
+struct SyncOutcome {
+    code: i32,
+    failure_detail: Option<String>,
+}
+
+fn failure_category(code: i32) -> &'static str {
+    match code {
+        EXIT_METRIC_FAILURE => "sync failed (exit code 1)",
+        EXIT_USAGE => "sync failed: invalid sync options or date window (exit code 2)",
+        EXIT_CONFIG => "sync failed: configuration or token problem (exit code 3)",
+        EXIT_AUTH => "sync failed: authentication problem (exit code 4)",
+        _ => "sync failed",
+    }
+}
+
+fn run_sync_loaded(
+    args: cli::SyncOptions,
+    scope: MetricScope,
+    dir: std::path::PathBuf,
+    config: &mut config::Config,
+) -> Result<SyncOutcome, AppError> {
     let metrics = scope.metrics();
     let include_weight = metrics.contains(&Metric::Weight);
     let include_bp = metrics.contains(&Metric::BloodPressure);
-
-    let dir = config::resolve_config_dir(args.config_dir.as_deref())?;
-
-    // Fail fast on missing/invalid config or tokens (exit 3).
-    let mut config = config::load_config(&dir)?;
     let mut session = session::Session::load(&dir)?;
     let tokens = session.tokens();
     if tokens.withings.access_token.trim().is_empty()
@@ -561,7 +633,7 @@ fn run_sync(cli_args: SyncArgs) -> Result<i32, AppError> {
             MetricScope::Weight => println!("summary: weight dry-run complete"),
             MetricScope::Bp => println!("summary: blood-pressure dry-run complete"),
         }
-        return Ok(EXIT_OK);
+        return Ok(SyncOutcome { code: EXIT_OK, failure_detail: None });
     }
 
     // Apply: write each metric independently; one failing does not block the
@@ -644,7 +716,7 @@ fn run_sync(cli_args: SyncArgs) -> Result<i32, AppError> {
         }
     }
     if !floors_moved.is_empty()
-        && let Err(error) = config::write_config(&config::config_path(&dir), &config)
+        && let Err(error) = config::write_config(&config::config_path(&dir), config)
     {
         eprintln!(
             "warning: could not write config after the apply: {}; \
@@ -678,10 +750,15 @@ fn run_sync(cli_args: SyncArgs) -> Result<i32, AppError> {
             );
             if any_failed {
                 println!("summary: 1 metric(s) failed");
-                Ok(EXIT_METRIC_FAILURE)
+                Ok(SyncOutcome {
+                    code: EXIT_METRIC_FAILURE,
+                    failure_detail: Some(format!(
+                        "sync failed: weight {weight_failed} failed, blood-pressure {bp_failed} failed"
+                    )),
+                })
             } else {
                 println!("summary: all metrics synced");
-                Ok(EXIT_OK)
+                Ok(SyncOutcome { code: EXIT_OK, failure_detail: None })
             }
         }
         MetricScope::Weight => {
@@ -691,10 +768,13 @@ fn run_sync(cli_args: SyncArgs) -> Result<i32, AppError> {
             );
             if any_failed {
                 println!("summary: weight failed");
-                Ok(EXIT_METRIC_FAILURE)
+                Ok(SyncOutcome {
+                    code: EXIT_METRIC_FAILURE,
+                    failure_detail: Some(format!("sync failed: weight {weight_failed} failed")),
+                })
             } else {
                 println!("summary: weight synced");
-                Ok(EXIT_OK)
+                Ok(SyncOutcome { code: EXIT_OK, failure_detail: None })
             }
         }
         MetricScope::Bp => {
@@ -704,10 +784,13 @@ fn run_sync(cli_args: SyncArgs) -> Result<i32, AppError> {
             );
             if any_failed {
                 println!("summary: blood-pressure failed");
-                Ok(EXIT_METRIC_FAILURE)
+                Ok(SyncOutcome {
+                    code: EXIT_METRIC_FAILURE,
+                    failure_detail: Some(format!("sync failed: blood-pressure {bp_failed} failed")),
+                })
             } else {
                 println!("summary: blood-pressure synced");
-                Ok(EXIT_OK)
+                Ok(SyncOutcome { code: EXIT_OK, failure_detail: None })
             }
         }
     }
