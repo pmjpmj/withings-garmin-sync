@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0](https://github.com/pmjpmj/withings-garmin-sync/compare/v0.1.10...v0.2.0) - 2026-11-28
+
+### Added
+
+- add opt-in ntfy failure notifications ([#13](https://github.com/pmjpmj/withings-garmin-sync/pull/13))
+
 ## [0.1.10](https://github.com/pmjpmj/withings-garmin-sync/compare/v0.1.9...v0.1.10) - 2026-11-28
 
 ### Added
