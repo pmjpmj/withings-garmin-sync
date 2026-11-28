@@ -13,6 +13,21 @@ pub struct Config {
     pub withings: WithingsConfig,
     #[serde(default)]
     pub sync: SyncConfig,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ntfy: Option<NtfyConfig>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NtfyConfig {
+    pub topic: String,
+    #[serde(default = "default_ntfy_server")]
+    pub server: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token: Option<String>,
+}
+
+fn default_ntfy_server() -> String {
+    "https://ntfy.sh".to_string()
 }
 
 impl Config {
@@ -22,6 +37,7 @@ impl Config {
         Self {
             withings: WithingsConfig { client_id: String::new(), client_secret: String::new() },
             sync: SyncConfig::default(),
+            ntfy: None,
         }
     }
 }
@@ -253,12 +269,17 @@ pub fn load_config(dir: &Path) -> Result<Config, AppError> {
             AppError::config(format!("config not found at {}; run `auth` first", path.display()))
         })?;
 
+    validate_config(config, &path)
+}
+
+/// Validate the required Withings settings after parsing the config file.
+pub fn validate_config(config: Config, path: &Path) -> Result<Config, AppError> {
     if config.withings.client_id.trim().is_empty()
         || config.withings.client_secret.trim().is_empty()
     {
         return Err(AppError::config(format!(
             "invalid config at {}: withings.client_id and withings.client_secret are required; run `auth` first",
-            path.display()
+            path.display(),
         )));
     }
 

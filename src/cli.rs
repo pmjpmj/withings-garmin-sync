@@ -135,4 +135,8 @@ pub struct SyncOptions {
     /// Log each API request and response
     #[arg(long)]
     pub verbose: bool,
+
+    /// Send a failure notification using the configured ntfy topic
+    #[arg(long)]
+    pub use_ntfy: bool,
 }

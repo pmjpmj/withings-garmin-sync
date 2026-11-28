@@ -1,0 +1,3 @@
+# ntfy notifications for failed sync runs
+
+Scheduled syncs can fail without an operator watching their logs. Add opt-in failure notifications through ntfy: `sync --use-ntfy` sends a concise summary to a configured `[ntfy]` topic after any nonzero sync outcome, including partial metric failures and errors after the ntfy settings have loaded. The topic is required, the server defaults to `https://ntfy.sh`, and an optional bearer token supports protected topics. Missing ntfy settings fail before sync starts; notification delivery errors only warn and never replace the sync result. Notifications omit measurement values and credentials.
